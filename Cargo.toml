@@ -1,0 +1,29 @@
+[package]
+name = "symphonia-opus"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Yevhen Bilyk <jiztastamablastamarang@gmail.com>"]
+description = "100% safe, pure-Rust Opus audio decoder (RFC 6716 / RFC 7845 / RFC 8251) for Symphonia."
+license = "MPL-2.0"
+repository = "https://github.com/jiztastamablastamarang/symphonia-opus"
+homepage = "https://github.com/jiztastamablastamarang/symphonia-opus"
+documentation = "https://docs.rs/symphonia-opus"
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "opus", "symphonia"]
+include = ["src/**/*", "tests/**/*", "LICENSE", "README.md", "Cargo.toml"]
+
+[dependencies]
+log = "0.4"
+symphonia-core = "0.6.1"
+thiserror = "1"
+
+[dev-dependencies]
+symphonia = { version = "0.6.1", default-features = false, features = ["ogg", "mkv"] }
+
+[lints.clippy]
+unwrap_used = "warn"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

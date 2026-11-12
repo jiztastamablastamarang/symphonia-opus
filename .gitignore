@@ -1,0 +1,29 @@
+# Rust/Cargo
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Editors
+*.code-workspace
+.vscode
+.idea
+*.md.backup
+
+# Profiling & scratch data
+perf.data
+perf.data.old
+
+# OS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+*~
+.directory
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+*.lnk
