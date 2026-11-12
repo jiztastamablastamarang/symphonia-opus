@@ -1,6 +1,6 @@
 [package]
 name = "symphonia-opus"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Yevhen Bilyk <jiztastamablastamarang@gmail.com>"]
@@ -13,6 +13,9 @@ readme = "README.md"
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 keywords = ["audio", "codec", "decoder", "opus", "symphonia"]
 include = ["src/**/*", "tests/**/*", "LICENSE", "README.md", "Cargo.toml"]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--document-private-items"]
 
 [dependencies]
 log = "0.4"
