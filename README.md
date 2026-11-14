@@ -48,7 +48,7 @@ codec_registry.register_audio_decoder_at_tier::<OpusDecoder>(Tier::Fallback);
 | :--- | :--- | :---: | :--- |
 | **Ogg Opus** (`.opus`, `.ogg`) | `ogg` | Full support | `OpusHead` v1, pre-skip, Q7.8 output gain, families 0 & 1 |
 | **Matroska / WebM** (`.webm`, `.mkv`) | `mkv` | Full support | `A_OPUS` `CodecPrivate` `OpusHead` |
-| **ISO / MP4** (`.mp4`, `.m4a`) | `isomp4` | Partial (`0.6.1` demuxer caveat) | `symphonia-format-isomp4 0.6.1` leaves big-endian `dOps` `PreSkip` and `OutputGain` un-swapped in `extra_data` (fixed upstream in [PR #398](https://github.com/pdeljanov/Symphonia/pull/398)) |
+| **ISO / MP4** (`.mp4`, `.m4a`) | `isomp4` | Full (`OutputGain = 0`) / Partial (`0.6.1` caveat) | `symphonia-format-isomp4 0.6.1` copies big-endian `dOps` `PreSkip` and `OutputGain` into `extra_data` without byte-swapping (`OutputGain = 0` tracks decode normally; non-zero gain fixed upstream in [PR #617](https://github.com/pdeljanov/Symphonia/pull/617)) |
 
 ---
 
@@ -125,6 +125,8 @@ symphonia-opus
 │       ├── postfilter.rs - Pitch comb post-filter (Section 4.3.7.1)
 │       ├── plc.rs        - LPC analysis and pitch search for concealment (Section 4.4)
 │       └── decoder.rs    - CELT frame decoder state and synthesis orchestration (Sections 4.3, 4.4)
+├── benches/
+│   └── decode.rs         - Self-contained microbenchmarks and RFC 8251 full-corpus throughput suite
 └── tests/
     └── rfc6716_conformance.rs - RFC 6716 Section 6 conformance on the RFC 8251 vectors (ignored unless OPUS_TESTVECTORS_DIR is set)
 ```
@@ -591,7 +593,7 @@ Summary across all 5 output sample rates (120 runs total):
 
 ### 8.3 Running the Tests
 
-The 143 self-contained unit tests require no external files:
+The 150 self-contained unit tests require no external files:
 
 ```bash
 cargo test
@@ -609,7 +611,82 @@ cargo test --release --test rfc6716_conformance -- --ignored --nocapture
 
 ---
 
-## 9. License & IETF Document Attribution
+## 9. Performance, Benchmarks & Memory Safety vs `libopus 1.6.1`
+
+### 9.1 Safety & Architectural Guarantees
+
+| Property | `symphonia-opus` (`Rust 2024`) | `libopus 1.6.1` (`C`) |
+| :--- | :--- | :--- |
+| **Memory & Type Safety** | `#![forbid(unsafe_code)]` across the entire crate and benchmark suite | Manual pointer arithmetic, VLAs / `ALLOC` pseudo-stack, raw C FFI |
+| **Toolchain & Build** | Pure Rust (`MSRV 1.85`), zero C compiler or `-sys` build scripts | Requires C toolchain, autotools/CMake, and link-time symbol coordination |
+| **Entropy Table Integrity** | Compile-time `const` validated `Cdf` tables (`power-of-two` total `2^k`, monotonic entries) | Unchecked `opus_uint16` arrays indexed by pointer offsets |
+| **Steady-State Allocations** | `0` heap allocations per packet (`PacketRef` -> planar `AudioBuffer<f32>`) | `0` heap allocations when compiled with `VAR_ARRAYS` / `USE_ALLOCA` |
+| **Output Layout** | Native zero-copy planar `AudioBuffer<f32>` (`decode_ref`) + optional interleaved copy | Interleaved `opus_decode_float` (`f32`) or `opus_decode` (`i16`) |
+| **Decoder Stack Size** | `< 1 KB` `OpusDecoder` struct (down from `~46.5 KB`; internal state boxed once at construction, multistream scratch allocated only when streams cannot decode directly into output planes) | Opaque heap/caller-sized `OpusDecoder` state (`~26..48 KB`) |
+
+### 9.2 Full-Corpus Throughput vs `libopus 1.6.1` (`320.6s` Audio, All 12 RFC 8251 Vectors)
+
+Measured on a single pinned core (`taskset -c 2`, Intel Xeon E5-2650 v2, median of 21 full-corpus passes per configuration across `testvector01..12`, `320.6s` of decoded audio per pass):
+
+- **Portable Scalar Build**: `rustc -C opt-level=3` vs `libopus 1.6.1` built with `-O3 --disable-intrinsics --disable-rtcd`.
+- **Native SIMD Build**: `rustc -C opt-level=3 -C target-cpu=native` (100% safe auto-vectorized Rust) vs `libopus 1.6.1` built with `-O3 -march=native` (hand-written SSE4.1/AVX intrinsics and runtime CPU dispatch).
+
+| Build & Output Config | `symphonia-opus` Planar | `symphonia-opus` Interleaved | `libopus 1.6.1` | Planar / `libopus` Speed | Real-Time Factor |
+| :--- | ---: | ---: | ---: | :---: | ---: |
+| **Portable** `48 kHz, 2 ch` | `1100.60 ms` | `1107.75 ms` | `1041.91 ms` | **`0.95x`** | `291x RT` |
+| **Portable** `48 kHz, 1 ch` | `939.36 ms` | `942.26 ms` | `869.86 ms` | **`0.93x`** | `341x RT` |
+| **Portable** `16 kHz, 1 ch` | `892.64 ms` | `896.09 ms` | `800.57 ms` | **`0.90x`** | `359x RT` |
+| **Native SIMD** `48 kHz, 2 ch` | `1088.27 ms` | `1098.64 ms` | `1006.86 ms` | **`0.93x`** | `295x RT` |
+| **Native SIMD** `48 kHz, 1 ch` | `940.62 ms` | `945.01 ms` | `848.20 ms` | **`0.90x`** | `341x RT` |
+| **Native SIMD** `16 kHz, 1 ch` | `886.58 ms` | `887.60 ms` | `775.80 ms` | **`0.88x`** | `362x RT` |
+
+### 9.3 Per-Mode Breakdown (`48 kHz` Stereo, Native SIMD Build)
+
+Without a single line of `unsafe` or target-specific intrinsics, `symphonia-opus` **outperforms `libopus 1.6.1` (`1.04x` to `1.17x` faster)** on every SILK-only and Hybrid test vector (`6 of 12` official IETF vectors), and reaches `0.83x` to `0.88x` of `libopus`'s hand-tuned SSE4.1/AVX assembly on pure CELT fullband music vectors:
+
+| Test Vector | Coding Mode & Content | `symphonia-opus` Planar | `libopus 1.6.1` (`-march=native`) | Relative Speed (`> 1.00x` = Faster than `libopus`) |
+| :--- | :--- | ---: | ---: | :---: |
+| `testvector02` | SILK Narrowband (speech, 49% stereo) | `32.04 ms` | `35.97 ms` | **`1.12x`** |
+| `testvector03` | SILK Mediumband (speech, 48% stereo) | `32.73 ms` | `36.19 ms` | **`1.11x`** |
+| `testvector04` | SILK Wideband (speech, 49% stereo) | `46.51 ms` | `52.68 ms` | **`1.13x`** |
+| `testvector05` | Hybrid Super-Wideband (SILK + CELT) | `96.87 ms` | `101.20 ms` | **`1.04x`** |
+| `testvector06` | Hybrid Fullband (SILK + CELT) | `96.03 ms` | `101.64 ms` | **`1.06x`** |
+| `testvector12` | SILK NB..WB + 19% Hybrid SWB | `35.34 ms` | `41.44 ms` | **`1.17x`** |
+| `testvector09` | CELT NB..FB (7 bandwidth switches) | `137.44 ms` | `120.28 ms` | `0.88x` |
+| `testvector10` | CELT FB + 16% Hybrid (16 mode switches) | `172.61 ms` | `152.76 ms` | `0.88x` |
+| `testvector11` | CELT Fullband stereo (high bitrate) | `112.53 ms` | `94.47 ms` | `0.84x` |
+| `testvector01` | CELT Fullband stereo | `160.53 ms` | `132.60 ms` | `0.83x` |
+| `testvector07` | CELT NB..FB (31 bandwidth switches) | `85.15 ms` | `70.42 ms` | `0.83x` |
+| `testvector08` | CELT NB..FB (29 bandwidth switches) | `80.49 ms` | `67.20 ms` | `0.83x` |
+
+Key safe-Rust optimizations behind these results:
+- **Zero-copy planar `AudioBuffer<f32>` decoding (`decoder.rs`, `planes.rs`)**: Single-stream and bijective Vorbis multi-stream packets decode directly into Symphonia's output planes without intermediate frame buffers or redundant `memset` passes.
+- **Division-free power-of-two `Cdf` decoding & branchless bit accounting (`entropy.rs`)**: Compile-time `Cdf` power-of-two invariants replace 32-bit integer divisions on the hot symbol path with bit shifts (`rng >> norm_shift`) and branchless `tell_frac` log-refinement.
+- **Auto-vectorized SILK LPC & polyphase FIR kernels (`silk/lpc.rs`, `silk/resampler.rs`)**: Const-generic 10th- and 16th-order LPC synthesis/analysis filters with pre-reversed taps and flat 8-tap `i16` FIR tables compile cleanly to packed SIMD multiply-accumulate instructions.
+- **Split-leg mixed-radix FFT, const-`N4` IMDCT & single-IMDCT mono-in-stereo (`celt/fft.rs`, `celt/mdct.rs`)**: Disjoint slice splits eliminate bounds checks across radix-2/3/4/5 butterflies, const-generic `N4` eliminates oversized stack zeroing on short blocks, and mono-coded CELT frames decoded into stereo output run one IMDCT instead of two.
+- **8-wide comb post-filter, branchless `u8` pulse-cache search & `Cell` Givens sweeps (`celt/postfilter.rs`, `celt/rate.rs`, `celt/vq.rs`, `celt/cwrs.rs`)**: Split past/current borrows unlock 8-lane SIMD comb filtering, branchless `u8` folds replace mispredicted binary searches in `bits2pulses_at_level`, and dense/sparse CWRS fast paths avoid redundant combinadic table updates.
+
+### 9.4 Running the Benchmarks
+
+Run the self-contained steady-state microbenchmarks (no external files or dependencies required):
+
+```bash
+cargo bench --bench decode
+# Fast 5-sample check:
+cargo bench --bench decode -- --quick
+```
+
+To include the full 12-vector RFC 8251 corpus suite (`48 kHz stereo`, `48 kHz mono`, and `16 kHz mono`, verifying `final_range()` across all checked packets on warmup):
+
+```bash
+OPUS_TESTVECTORS_DIR=<path to opus_newvectors> \
+RUSTFLAGS="-C target-cpu=native" \
+cargo bench --bench decode
+```
+
+---
+
+## 10. License & IETF Document Attribution
 
 `symphonia-opus` is distributed under the Mozilla Public License 2.0 like the rest of Symphonia (see [`LICENSE`](LICENSE)).
 
