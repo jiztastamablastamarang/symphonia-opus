@@ -121,6 +121,17 @@ fn inverted(params: PostFilterParams) -> PostFilterParams {
     return PostFilterParams { gain: -params.gain, ..params };
 }
 
+/// SIMD chunk width for recursive in-place comb filtering. Because `MIN_PITCH_PERIOD` is `15`,
+/// all five taps (`period - 2 ..= period + 2`) of `8` consecutive output samples lie strictly
+/// inside the already-filtered prefix (`15 - 2 = 13 >= 8`).
+const LANES: usize = 8;
+
+/// Contiguous history window (`LANES + 4 = 12` samples) spanning all five taps across `LANES`
+/// consecutive output samples.
+const TAP_WINDOW: usize = LANES + 4;
+
+const _: () = assert!(MIN_PITCH_PERIOD >= LANES + 2);
+
 /// Tap weights of one comb filter setting: the gain times the tapset's three symmetric taps
 /// ([RFC 6716 Section 4.3.7.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7.1>)).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,12 +145,27 @@ struct CombFilterTaps {
 }
 
 impl CombFilterTaps {
+    /// Unscaled symmetric tap weights of `params.tapset`.
+    #[inline]
+    fn unscaled(params: PostFilterParams) -> Self {
+        let [center, first, second] = COMB_FILTER_GAINS[params.tapset.min(2)];
+        return Self { center, first, second };
+    }
+
+    /// Scales each tap weight by `gain`.
+    #[inline]
+    fn scaled(self, gain: f32) -> Self {
+        return Self {
+            center: gain * self.center,
+            first: gain * self.first,
+            second: gain * self.second,
+        };
+    }
+
     /// Tap weights of `params`, scaled by `weight` (the cross-fade factor, or `1`).
     #[inline]
     fn of(params: PostFilterParams, weight: f32) -> Self {
-        let [center, first, second] =
-            COMB_FILTER_GAINS[params.tapset.min(2)].map(|tap| (weight * params.gain) * tap);
-        return Self { center, first, second };
+        return Self::unscaled(params).scaled(weight * params.gain);
     }
 
     /// Comb term of the taps centred on `x[p]`.
@@ -149,6 +175,39 @@ impl CombFilterTaps {
             + self.first * (x[p + 1] + x[p - 1])
             + self.second * (x[p + 2] + x[p - 2]);
     }
+
+    /// Adds the comb term centred on `x[p]` onto `acc` in left-to-right tap order.
+    #[inline]
+    fn accumulate(&self, acc: f32, x: &[f32], p: usize) -> f32 {
+        return acc
+            + self.center * x[p]
+            + self.first * (x[p + 1] + x[p - 1])
+            + self.second * (x[p + 2] + x[p - 2]);
+    }
+
+    /// Comb term of `lane` within a `TAP_WINDOW` slice starting at `pos - period - 2`.
+    #[inline(always)]
+    fn comb_lane(&self, taps: &[f32; TAP_WINDOW], lane: usize) -> f32 {
+        return self.center * taps[lane + 2]
+            + self.first * (taps[lane + 3] + taps[lane + 1])
+            + self.second * (taps[lane + 4] + taps[lane]);
+    }
+
+    /// Adds the comb term of `lane` within `taps` onto `acc` in left-to-right tap order.
+    #[inline(always)]
+    fn accumulate_lane(&self, acc: f32, taps: &[f32; TAP_WINDOW], lane: usize) -> f32 {
+        return acc
+            + self.center * taps[lane + 2]
+            + self.first * (taps[lane + 3] + taps[lane + 1])
+            + self.second * (taps[lane + 4] + taps[lane]);
+    }
+}
+
+/// Returns the `TAP_WINDOW` history samples starting at `past.len() - period - 2`.
+#[inline(always)]
+fn tap_window(past: &[f32], period: usize) -> Option<&[f32; TAP_WINDOW]> {
+    let start = past.len().checked_sub(period + 2)?;
+    return past.get(start..)?.first_chunk::<TAP_WINDOW>();
 }
 
 /// Pitch period of a comb filter setting, raised to [`MIN_PITCH_PERIOD`].
@@ -177,49 +236,69 @@ fn filter_in_place(
     let period1 = period_of(to);
     debug_assert!(history_offset >= period0 + 2);
     debug_assert!(history_offset >= period1 + 2);
+    debug_assert!(signal_buf.len() >= history_offset + n);
 
-    let new = CombFilterTaps::of(to, 1.0);
-
-    let mut x1 = signal_buf[history_offset - period1 + 1];
-    let mut x2 = signal_buf[history_offset - period1];
-    let mut x3 = signal_buf[history_offset - period1 - 1];
-    let mut x4 = signal_buf[history_offset - period1 - 2];
+    let signal_buf = &mut signal_buf[..history_offset + n];
+    let old_unit = CombFilterTaps::unscaled(from);
+    let new_unit = CombFilterTaps::unscaled(to);
+    let new = new_unit.scaled(g1);
 
     let same_filter = g0 == g1 && period0 == period1 && from.tapset == to.tapset;
     let xfade_len = if same_filter { 0 } else { OVERLAP.min(n) };
 
-    for (i, &w) in CELT_WINDOW.iter().enumerate().take(xfade_len) {
-        let pos = history_offset + i;
-        let x0 = signal_buf[pos - period1 + 2];
+    let xfade_windows = CELT_WINDOW[..xfade_len].chunks_exact(LANES);
+    let xfade_rem = xfade_windows.remainder();
+    let xfade_vec_len = xfade_len - xfade_rem.len();
+    for (chunk_step, win_slice) in xfade_windows.enumerate() {
+        let pos = history_offset + chunk_step * LANES;
+        let (past, rest) = signal_buf.split_at_mut(pos);
+        let (Some(current), Some(win), Some(taps0), Some(taps1)) = (
+            rest.first_chunk_mut::<LANES>(),
+            win_slice.first_chunk::<LANES>(),
+            tap_window(past, period0),
+            tap_window(past, period1),
+        )
+        else {
+            return;
+        };
+        for (lane, (sample, &w)) in current.iter_mut().zip(win.iter()).enumerate() {
+            let f = w * w;
+            let fading_out = old_unit.scaled((1.0_f32 - f) * g0);
+            let fading_in = new_unit.scaled(f * g1);
+            let out_comb = fading_out.comb_lane(taps0, lane);
+            *sample = fading_in.accumulate_lane(*sample + out_comb, taps1, lane);
+        }
+    }
+    for (offset, &w) in xfade_rem.iter().enumerate() {
+        let pos = history_offset + xfade_vec_len + offset;
         let f = w * w;
-        let fading_out = CombFilterTaps::of(from, 1.0_f32 - f);
-        let fading_in = CombFilterTaps::of(to, f);
-
-        signal_buf[pos] = signal_buf[pos]
-            + fading_out.comb(signal_buf, pos - period0)
-            + fading_in.center * x2
-            + fading_in.first * (x1 + x3)
-            + fading_in.second * (x0 + x4);
-
-        x4 = x3;
-        x3 = x2;
-        x2 = x1;
-        x1 = x0;
+        let fading_out = old_unit.scaled((1.0_f32 - f) * g0);
+        let fading_in = new_unit.scaled(f * g1);
+        let out_comb = fading_out.comb(signal_buf, pos - period0);
+        signal_buf[pos] =
+            fading_in.accumulate(signal_buf[pos] + out_comb, signal_buf, pos - period1);
     }
 
     if g1 == 0.0 {
         return;
     }
 
-    for i in xfade_len..n {
+    let steady_vec_end = xfade_len + ((n - xfade_len) & !(LANES - 1));
+    for base in (xfade_len..steady_vec_end).step_by(LANES) {
+        let pos = history_offset + base;
+        let (past, rest) = signal_buf.split_at_mut(pos);
+        let (Some(current), Some(taps1)) =
+            (rest.first_chunk_mut::<LANES>(), tap_window(past, period1))
+        else {
+            return;
+        };
+        for (lane, sample) in current.iter_mut().enumerate() {
+            *sample = new.accumulate_lane(*sample, taps1, lane);
+        }
+    }
+    for i in steady_vec_end..n {
         let pos = history_offset + i;
-        let x0 = signal_buf[pos - period1 + 2];
-        signal_buf[pos] =
-            signal_buf[pos] + new.center * x2 + new.first * (x1 + x3) + new.second * (x0 + x4);
-        x4 = x3;
-        x3 = x2;
-        x2 = x1;
-        x1 = x0;
+        signal_buf[pos] = new.accumulate(signal_buf[pos], signal_buf, pos - period1);
     }
     return;
 }

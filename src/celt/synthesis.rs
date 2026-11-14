@@ -61,13 +61,13 @@ pub(crate) fn denormalise_bands(
     let Denormalisation { start, end, lm, downsample, silence } = *layout;
     let m = lm.blocks();
     let n = lm.frame_samples();
-    debug_assert!(norm_x.len() >= n);
     debug_assert!(freq.len() >= n);
 
     if silence {
         freq[..n].fill(0.0);
         return;
     }
+    debug_assert!(norm_x.len() >= n);
 
     let start_bin = m * EBANDS[start];
     freq[..start_bin].fill(0.0);
@@ -96,6 +96,44 @@ pub(crate) fn denormalise_bands(
 }
 
 /// Applies the one-pole de-emphasis filter `y[j] = x[j] + PREEMPH_COEF * y[j - 1]` to one
+/// channel of `input`, keeps every `downsample`-th output sample, and passes each sample scaled
+/// by `1 / CELT_SIG_SCALE` to `write`.
+#[inline(always)]
+fn deemphasis_with<F>(
+    input: &[f32],
+    out: &mut [f32],
+    downsample: usize,
+    preemph_mem: &mut f32,
+    mut write: F,
+) -> usize
+where
+    F: FnMut(&mut f32, f32),
+{
+    let n = input.len();
+    if downsample == 1 {
+        debug_assert!(out.len() >= n);
+        let mut m = *preemph_mem;
+        for (dst, &x) in out[..n].iter_mut().zip(input.iter()) {
+            write(dst, deemphasize(x, &mut m) * INV_CELT_SIG_SCALE);
+        }
+        *preemph_mem = m;
+        return n;
+    }
+
+    debug_assert!(downsample > 1);
+    let out_len = n / downsample;
+    debug_assert!(out.len() >= out_len);
+
+    let mut m = *preemph_mem;
+    for (block, dst) in input.chunks_exact(downsample).zip(out[..out_len].iter_mut()) {
+        write(dst, deemphasize(block[0], &mut m) * INV_CELT_SIG_SCALE);
+        block[1..].iter().for_each(|&x| _ = deemphasize(x, &mut m));
+    }
+    *preemph_mem = m;
+    return out_len;
+}
+
+/// Applies the one-pole de-emphasis filter `y[j] = x[j] + PREEMPH_COEF * y[j - 1]` to one
 /// channel of `input`, keeps every `downsample`-th output sample, and scales the result by
 /// `1 / CELT_SIG_SCALE` into `pcm_out`
 /// ([RFC 6716 Section 4.3.7.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7.2>)).
@@ -107,18 +145,26 @@ pub(crate) fn deemphasis_channel(
     downsample: usize,
     preemph_mem: &mut f32,
 ) -> usize {
-    let n = input.len();
-    debug_assert!(downsample >= 1);
-    let out_len = n / downsample;
-    debug_assert!(pcm_out.len() >= out_len);
+    return deemphasis_with(input, pcm_out, downsample, preemph_mem, |dst, sample| {
+        *dst = sample;
+    });
+}
 
-    let mut m = *preemph_mem;
-    for (block, dst) in input.chunks_exact(downsample).zip(pcm_out[..out_len].iter_mut()) {
-        *dst = deemphasize(block[0], &mut m) * INV_CELT_SIG_SCALE;
-        block[1..].iter().for_each(|&x| _ = deemphasize(x, &mut m));
-    }
-    *preemph_mem = m;
-    return out_len;
+/// Applies the one-pole de-emphasis filter `y[j] = x[j] + PREEMPH_COEF * y[j - 1]` to one
+/// channel of `input`, keeps every `downsample`-th output sample, and adds the result scaled by
+/// `1 / CELT_SIG_SCALE` directly onto `out`
+/// ([RFC 6716 Section 4.3.7.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7.2>)).
+///
+/// Returns the number of output samples accumulated into `out` (`input.len() / downsample`).
+pub(crate) fn deemphasis_channel_accumulate(
+    input: &[f32],
+    out: &mut [f32],
+    downsample: usize,
+    mem: &mut f32,
+) -> usize {
+    return deemphasis_with(input, out, downsample, mem, |dst, sample| {
+        *dst += sample;
+    });
 }
 
 /// One step of the first-order de-emphasis filter `y = x + m`, `m = PREEMPH_COEF * y`
@@ -155,6 +201,27 @@ mod tests {
         assert!((mem_48k - mem_16k).abs() < 1.0e-5);
         for k in 0..16 {
             assert!((pcm_16k[k] - pcm_48k[3 * k]).abs() < 1.0e-7);
+        }
+
+        // Accumulate variant matches baseline + overwrite bit-for-bit at both 48 kHz and 16 kHz.
+        let mut acc_48k = [0.25_f32; 48];
+        let mut mem_acc_48k = 0.0_f32;
+        let acc_written_48k =
+            deemphasis_channel_accumulate(&input, &mut acc_48k, 1, &mut mem_acc_48k);
+        assert_eq!(acc_written_48k, 48);
+        assert_eq!(mem_acc_48k.to_bits(), mem_48k.to_bits());
+        for k in 0..48 {
+            assert_eq!(acc_48k[k].to_bits(), (0.25_f32 + pcm_48k[k]).to_bits());
+        }
+
+        let mut acc_16k = [-0.125_f32; 16];
+        let mut mem_acc_16k = 0.0_f32;
+        let acc_written_16k =
+            deemphasis_channel_accumulate(&input, &mut acc_16k, 3, &mut mem_acc_16k);
+        assert_eq!(acc_written_16k, 16);
+        assert_eq!(mem_acc_16k.to_bits(), mem_16k.to_bits());
+        for k in 0..16 {
+            assert_eq!(acc_16k[k].to_bits(), (-0.125_f32 + pcm_16k[k]).to_bits());
         }
         return;
     }

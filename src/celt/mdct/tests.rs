@@ -278,3 +278,98 @@ fn imdct_overlap_add_transient_short_blocks_match_recorded_values() {
     );
     return;
 }
+
+fn assert_f32_slice_bit_identical(actual: &[f32], expected: &[f32], label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{}: length mismatch", label);
+    for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            e.to_bits(),
+            "{}: bit mismatch at sample {}: actual = {:.9e} ({:#010x}), expected = {:.9e} ({:#010x})",
+            label,
+            i,
+            a,
+            a.to_bits(),
+            e,
+            e.to_bits(),
+        );
+    }
+    return;
+}
+
+#[test]
+fn mdct_backward_frame_dual_is_bit_identical_for_all_block_sizes_and_transients() {
+    let half_overlap = OVERLAP / 2;
+
+    for lm in 0..=3 {
+        let block_size = BlockSize::new(lm);
+        let n_bins = block_size.frame_samples();
+        let total_len = n_bins + OVERLAP;
+
+        for is_transient in [false, true] {
+            let mut in_freq = [0.0f32; MAX_FRAME_SIZE];
+            for (i, slot) in in_freq[..n_bins].iter_mut().enumerate() {
+                let phase_a = ((i + 1) as f32) * 0.13 + (lm as f32) * 0.7;
+                let phase_b = (i as f32) * 0.041;
+                *slot = phase_a.sin() * phase_b.cos() * 75.0;
+            }
+
+            let mut left_expected = [0.0f32; MAX_FRAME_SIZE + OVERLAP];
+            let mut right_expected = [0.0f32; MAX_FRAME_SIZE + OVERLAP];
+            for (i, slot) in left_expected[..total_len].iter_mut().enumerate() {
+                *slot = ((i as f32) * 0.29 + 0.4).sin() * 23.5 - 4.25;
+            }
+            for (i, slot) in right_expected[..total_len].iter_mut().enumerate() {
+                *slot = ((i as f32) * 0.19 + 1.1).cos() * 31.0 + 9.75;
+            }
+
+            let mut left_actual = left_expected;
+            let mut right_actual = right_expected;
+
+            mdct_backward_frame(
+                &in_freq[..n_bins],
+                &mut left_expected[..total_len],
+                block_size,
+                is_transient,
+            );
+            mdct_backward_frame(
+                &in_freq[..n_bins],
+                &mut right_expected[..total_len],
+                block_size,
+                is_transient,
+            );
+            mdct_backward_frame_dual(
+                &in_freq[..n_bins],
+                &mut left_actual[..total_len],
+                &mut right_actual[..total_len],
+                block_size,
+                is_transient,
+            );
+
+            let left_label = format!("left lm={} transient={}", lm, is_transient);
+            let right_label = format!("right lm={} transient={}", lm, is_transient);
+            assert_f32_slice_bit_identical(
+                &left_actual[..total_len],
+                &left_expected[..total_len],
+                &left_label,
+            );
+            assert_f32_slice_bit_identical(
+                &right_actual[..total_len],
+                &right_expected[..total_len],
+                &right_label,
+            );
+
+            let distinct_overlap = left_actual[..OVERLAP]
+                .iter()
+                .zip(right_actual[..OVERLAP].iter())
+                .all(|(&l, &r)| l.to_bits() != r.to_bits());
+            assert!(distinct_overlap, "expected distinct overlap region for lm={}", lm);
+            assert_f32_slice_bit_identical(
+                &left_actual[OVERLAP..n_bins + half_overlap],
+                &right_actual[OVERLAP..n_bins + half_overlap],
+                "shared post-overlap region",
+            );
+        }
+    }
+    return;
+}

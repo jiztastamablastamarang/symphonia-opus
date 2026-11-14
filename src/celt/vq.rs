@@ -28,6 +28,7 @@ use crate::celt::rate::{
 };
 use crate::entropy::Decoder;
 use crate::planes::Planes;
+use std::cell::Cell;
 use std::f32::consts::FRAC_1_SQRT_2;
 use symphonia_core::errors::Result;
 
@@ -160,15 +161,41 @@ fn rotation_sweep(x: &mut [f32], stride: usize, c: f32, s: f32) {
     if len <= stride {
         return;
     }
-    let mut rotate = |i: usize| {
-        let x1 = x[i];
-        let x2 = x[i + stride];
-        x[i + stride] = c * x2 + s * x1;
-        x[i] = c * x1 - s * x2;
+    let cells = Cell::from_mut(x).as_slice_of_cells();
+    if stride == 1 {
+        let mut prev = cells[0].get();
+        for (curr, next) in cells[..len - 1].iter().zip(cells[1..].iter()) {
+            let x2 = next.get();
+            curr.set(c * prev - s * x2);
+            prev = c * x2 + s * prev;
+        }
+        cells[len - 1].set(prev);
+        if len > 2 {
+            let mut next_val = cells[len - 2].get();
+            for (curr, next) in cells[..len - 2].iter().zip(cells[1..len - 1].iter()).rev() {
+                let x1 = curr.get();
+                next.set(c * next_val + s * x1);
+                next_val = c * x1 - s * next_val;
+            }
+            cells[0].set(next_val);
+        }
+        return;
+    }
+
+    let rotate = |(low, high): (&Cell<f32>, &Cell<f32>)| {
+        let x1 = low.get();
+        let x2 = high.get();
+        high.set(c * x2 + s * x1);
+        low.set(c * x1 - s * x2);
     };
-    (0..(len - stride)).for_each(&mut rotate);
+    cells[..len - stride].iter().zip(cells[stride..].iter()).for_each(rotate);
     if len > 2 * stride {
-        (0..(len - 2 * stride)).rev().for_each(rotate);
+        let back_len = len - 2 * stride;
+        cells[..back_len]
+            .iter()
+            .zip(cells[stride..stride + back_len].iter())
+            .rev()
+            .for_each(rotate);
     }
     return;
 }
@@ -196,6 +223,7 @@ impl SpreadingRotation {
         if 2 * pulses >= len || spread == Spread::None || blocks == 0 {
             return None;
         }
+        debug_assert!(blocks.is_power_of_two());
         let factor = SPREAD_FACTOR[(spread as usize) - 1];
         let gain = (len as f32) / ((len + factor * pulses) as f32);
         let theta = 0.5_f32 * gain * gain;
@@ -209,7 +237,9 @@ impl SpreadingRotation {
                 stride2 += 1;
             }
         }
-        return Some(Self { c, s, stride2, sub_len: len / blocks });
+        let sub_len = len >> blocks.trailing_zeros();
+        debug_assert_eq!(len, sub_len * blocks);
+        return Some(Self { c, s, stride2, sub_len });
     }
 }
 
@@ -221,11 +251,19 @@ fn spreading_rotation(x: &mut [f32], blocks: usize, pulses: usize, spread: Sprea
     else {
         return;
     };
-    for chunk in x.chunks_exact_mut(sub_len) {
+    let rotate_block = |chunk: &mut [f32]| {
         if stride2 > 0 {
             rotation_sweep(chunk, stride2, s, c);
         }
         rotation_sweep(chunk, 1, c, s);
+    };
+    if blocks == 1 {
+        rotate_block(x);
+        return;
+    }
+    for block in 0..blocks {
+        let start = block * sub_len;
+        rotate_block(&mut x[start..start + sub_len]);
     }
     return;
 }
@@ -247,12 +285,17 @@ fn collapse_mask(iy: &[i32], blocks: usize) -> u32 {
     if blocks <= 1 {
         return 1;
     }
-    let n0 = iy.len() / blocks;
-    return iy
-        .chunks_exact(n0)
-        .enumerate()
-        .filter(|(_, block_pulses)| block_pulses.iter().any(|&p| p != 0))
-        .fold(0u32, |mask, (i, _)| mask | (1u32 << i));
+    debug_assert!(blocks.is_power_of_two());
+    let block_len = iy.len() >> blocks.trailing_zeros();
+    debug_assert_eq!(iy.len(), block_len * blocks);
+    let mut mask = 0u32;
+    for block in 0..blocks {
+        let start = block * block_len;
+        if iy[start..start + block_len].iter().any(|&p| p != 0) {
+            mask |= 1u32 << block;
+        }
+    }
+    return mask;
 }
 
 /// Unquantizes the algebraic PVQ partition `x` with `pulses` pulses and `blocks` time sub-blocks
@@ -287,17 +330,46 @@ pub(crate) fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
     return;
 }
 
-/// Applies a single-level 1D Haar wavelet butterfly between the `stride`-spaced halves of each
-/// `2 * stride` group of `x[..n0 * stride]`
-/// ([RFC 6716 Section 4.3.4.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.5>)).
-fn haar_transform(x: &mut [f32], n0: usize, stride: usize) {
-    for pair in x[..(n0 * stride)].chunks_exact_mut(2 * stride) {
-        let (low, high) = pair.split_at_mut(stride);
+/// Const-stride inner loop of [`haar_transform`], enabling shift-based chunking and fixed-width
+/// SIMD vectorization for CELT's power-of-two block counts (`1`, `2`, `4`, `8`).
+#[inline]
+fn haar_step<const STRIDE: usize>(slice: &mut [f32]) {
+    for pair in slice.chunks_exact_mut(2 * STRIDE) {
+        let (low, high) = pair.split_at_mut(STRIDE);
         for (a, b) in low.iter_mut().zip(high.iter_mut()) {
             let tmp1 = FRAC_1_SQRT_2 * *a;
             let tmp2 = FRAC_1_SQRT_2 * *b;
             *a = tmp1 + tmp2;
             *b = tmp1 - tmp2;
+        }
+    }
+    return;
+}
+
+/// Applies a single-level 1D Haar wavelet butterfly between the `stride`-spaced halves of each
+/// `2 * stride` group of `x[..n0 * stride]`
+/// ([RFC 6716 Section 4.3.4.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.5>)).
+fn haar_transform(x: &mut [f32], n0: usize, stride: usize) {
+    let slice = &mut x[..(n0 * stride)];
+    match stride {
+        1 => haar_step::<1>(slice),
+        2 => haar_step::<2>(slice),
+        4 => haar_step::<4>(slice),
+        8 => haar_step::<8>(slice),
+        _ => {
+            let group_len = 2 * stride;
+            let mut rem = slice;
+            while rem.len() >= group_len {
+                let (pair, tail) = rem.split_at_mut(group_len);
+                rem = tail;
+                let (low, high) = pair.split_at_mut(stride);
+                for (a, b) in low.iter_mut().zip(high.iter_mut()) {
+                    let tmp1 = FRAC_1_SQRT_2 * *a;
+                    let tmp2 = FRAC_1_SQRT_2 * *b;
+                    *a = tmp1 + tmp2;
+                    *b = tmp1 - tmp2;
+                }
+            }
         }
     }
     return;
@@ -691,12 +763,17 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         let Lowband { source, out } = lowband;
         let tf = TimeFrequency::new(n, blocks, self.tf_change);
 
-        let mut lowband_buf = [0.0_f32; MAX_BAND_WIDTH];
-        if let Some(src) = source {
-            lowband_buf[..n].copy_from_slice(&src[..n]);
-            tf.fold_source_forward(&mut lowband_buf[..n]);
-        }
-        let folded = source.map(|_| &lowband_buf[..n]);
+        let mut lowband_buf;
+        let folded = match source {
+            Some(src) if tf.needs_forward_transform() => {
+                lowband_buf = [0.0_f32; MAX_BAND_WIDTH];
+                lowband_buf[..n].copy_from_slice(&src[..n]);
+                tf.fold_source_forward(&mut lowband_buf[..n]);
+                Some(&lowband_buf[..n])
+            }
+            Some(src) => Some(&src[..n]),
+            None => None,
+        };
         let decoded = Partition { blocks: tf.blocks, fill: tf.fill_forward(fill), ..part };
         let cm = self.quant_partition(&mut x[..n], folded, decoded)?;
         let cm = tf.inverse(&mut x[..n], cm);
@@ -853,9 +930,10 @@ struct TimeFrequency {
 
 impl TimeFrequency {
     fn new(n: usize, initial_blocks: usize, tf_change: i32) -> Self {
+        debug_assert!(initial_blocks >= 1 && initial_blocks.is_power_of_two());
         let recombine = tf_change.max(0) as usize;
         let divisions = (-tf_change).max(0) as usize;
-        let n_b0 = (n / initial_blocks) << recombine;
+        let n_b0 = (n >> initial_blocks.trailing_zeros()) << recombine;
         let time_divide = (0..divisions).take_while(|&k| ((n_b0 >> k) & 1) == 0).count();
         return Self {
             n,
@@ -865,6 +943,12 @@ impl TimeFrequency {
             blocks: (initial_blocks >> recombine) << time_divide,
             n_b: n_b0 >> time_divide,
         };
+    }
+
+    /// Whether [`Self::fold_source_forward`] modifies the folding source buffer.
+    #[inline]
+    fn needs_forward_transform(&self) -> bool {
+        return self.recombine > 0 || self.time_divide > 0 || self.blocks > 1;
     }
 
     /// Block order of the de-interleaved band: sequency order for a long-block frame.
@@ -889,7 +973,7 @@ impl TimeFrequency {
             haar_transform(lowband, self.n >> k, 1 << k);
         }
         let blocks = self.initial_blocks >> self.recombine;
-        let n_b = (self.n / self.initial_blocks) << self.recombine;
+        let n_b = self.n_b << self.time_divide;
         for k in 0..self.time_divide {
             haar_transform(lowband, n_b >> k, blocks << k);
         }

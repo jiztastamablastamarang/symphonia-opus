@@ -33,14 +33,16 @@ use crate::celt::energy::{
     BandEnergyHistory, unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy,
 };
 use crate::celt::error::Error;
-use crate::celt::mdct::mdct_backward_frame;
+use crate::celt::mdct::{mdct_backward_frame, mdct_backward_frame_dual};
 use crate::celt::plc::{PlcState, fill_noise_spectrum};
 use crate::celt::postfilter::{ChannelHistory, CombFilter};
 use crate::celt::rate::{
     AllocationLayout, BandAllocation, PostFilterParams, decode_bit_allocation, decode_postfilter,
     decode_spread_decision, tf_decode,
 };
-use crate::celt::synthesis::{Denormalisation, deemphasis_channel, denormalise_bands};
+use crate::celt::synthesis::{
+    Denormalisation, deemphasis_channel, deemphasis_channel_accumulate, denormalise_bands,
+};
 use crate::celt::{
     BITRES, BlockSize, DECODE_BUFFER_SIZE, MAX_BANDS, MAX_CHANNELS, MAX_FRAME_SIZE, OVERLAP,
     SILENCE_FRAME, Spread, end_band_for,
@@ -389,18 +391,19 @@ impl Decoder {
         }
 
         let header = decode_frame_header(dec, lm, self.config.start_band, total_bits)?;
-        let mut x_norm = [0.0_f32; MAX_CHANNELS * MAX_FRAME_SIZE];
         match header.silence {
             true => {
                 self.synthesis.shift_history(self.config.output_channels, n);
                 self.energy.silence(self.config.stream_channels);
+                self.synthesize(&[], lm, header);
             }
             false => {
+                let mut x_norm = [0.0_f32; MAX_CHANNELS * MAX_FRAME_SIZE];
                 self.decode_spectrum(dec, lm, header, total_bits, &mut x_norm)?;
+                let coded_bins = self.config.stream_channels * n;
+                self.synthesize(&x_norm[..coded_bins], lm, header);
             }
         }
-
-        self.synthesize(&x_norm, lm, header);
         self.rng = dec.final_range();
         self.deemphasize(n, out, mix);
         self.plc.end_loss();
@@ -523,7 +526,7 @@ impl Decoder {
             self.postfilter.prefilter_and_fold(&mut self.synthesis.decode_mem[..cc], n);
         }
         let bands = start_band..end_band.min(MAX_BANDS);
-        self.synthesize_mdct(&x_norm[..(c * n)], lm, c, bands, header.is_transient, header.silence);
+        self.synthesize_mdct(x_norm, lm, c, bands, header.is_transient, header.silence);
 
         self.postfilter.apply(&mut self.synthesis.decode_mem[..cc], n, lm, header.postfilter);
         let loss_duration = self.plc.loss_duration;
@@ -614,6 +617,7 @@ impl Decoder {
     ) {
         let n = lm.frame_samples();
         let out_offset = DECODE_BUFFER_SIZE - n;
+        let range = out_offset..(out_offset + n + OVERLAP);
         let layout = Denormalisation {
             start: bands.start,
             end: bands.end,
@@ -623,37 +627,62 @@ impl Decoder {
         };
         let band_e = &self.energy.current;
         let denormalise = |ch: usize, freq: &mut [f32]| {
-            let x = x_norm.chunks_exact(n).nth(ch).unwrap_or(&[]);
+            let x = x_norm.get((ch * n)..((ch + 1) * n)).unwrap_or(&[]);
             denormalise_bands(x, freq, &band_e[ch], &layout);
         };
-        let mut freq = [[0.0_f32; MAX_FRAME_SIZE]; MAX_CHANNELS];
 
-        let channels = match (self.config.output_channels, coded_channels) {
+        match (self.config.output_channels, coded_channels) {
+            (1, 1) => {
+                let mut freq = [0.0_f32; MAX_FRAME_SIZE];
+                denormalise(0, &mut freq[..n]);
+                mdct_backward_frame(
+                    &freq[..n],
+                    &mut self.synthesis.decode_mem[0][range],
+                    lm,
+                    is_transient,
+                );
+            }
             (2, 1) => {
-                denormalise(0, &mut freq[0][..n]);
-                freq[1] = freq[0];
-                2
+                let mut freq = [0.0_f32; MAX_FRAME_SIZE];
+                denormalise(0, &mut freq[..n]);
+                let [left_mem, right_mem] = &mut self.synthesis.decode_mem;
+                mdct_backward_frame_dual(
+                    &freq[..n],
+                    &mut left_mem[range.clone()],
+                    &mut right_mem[range],
+                    lm,
+                    is_transient,
+                );
             }
             (1, 2) => {
+                let mut freq = [[0.0_f32; MAX_FRAME_SIZE]; MAX_CHANNELS];
                 let [left, right] = &mut freq;
                 denormalise(0, &mut left[..n]);
                 denormalise(1, &mut right[..n]);
                 for (f0, &f1) in left[..n].iter_mut().zip(right[..n].iter()) {
                     *f0 = 0.5_f32 * (*f0 + f1);
                 }
-                1
+                mdct_backward_frame(
+                    &left[..n],
+                    &mut self.synthesis.decode_mem[0][range],
+                    lm,
+                    is_transient,
+                );
             }
             (cc, _) => {
+                let mut freq = [[0.0_f32; MAX_FRAME_SIZE]; MAX_CHANNELS];
                 (0..cc).for_each(|ch| denormalise(ch, &mut freq[ch][..n]));
-                cc
+                for (spectrum, channel) in
+                    freq.iter().zip(self.synthesis.decode_mem.iter_mut()).take(cc)
+                {
+                    mdct_backward_frame(
+                        &spectrum[..n],
+                        &mut channel[range.clone()],
+                        lm,
+                        is_transient,
+                    );
+                }
             }
-        };
-
-        for (spectrum, channel) in
-            freq.iter().zip(self.synthesis.decode_mem.iter_mut()).take(channels)
-        {
-            let window = &mut channel[out_offset..(out_offset + n + OVERLAP)];
-            mdct_backward_frame(&spectrum[..n], window, lm, is_transient);
         }
         return;
     }
@@ -672,14 +701,10 @@ impl Decoder {
         let planes = std::iter::once(left).chain(right);
         for ((plane, channel), mem) in planes.zip(decode_mem.iter()).zip(preemph_mem.iter_mut()) {
             let input = &channel[out_offset..DECODE_BUFFER_SIZE];
-            if mix == Mix::Overwrite {
-                deemphasis_channel(input, &mut plane[..out_samples], downsample, mem);
-                continue;
-            }
-            let mut tmp_pcm = [0.0_f32; MAX_FRAME_SIZE];
-            deemphasis_channel(input, &mut tmp_pcm[..out_samples], downsample, mem);
-            for (dst, &src) in plane[..out_samples].iter_mut().zip(tmp_pcm[..out_samples].iter()) {
-                *dst += src;
+            let dst = &mut plane[..out_samples];
+            match mix {
+                Mix::Overwrite => _ = deemphasis_channel(input, dst, downsample, mem),
+                Mix::Accumulate => _ = deemphasis_channel_accumulate(input, dst, downsample, mem),
             }
         }
         return;

@@ -20,9 +20,9 @@ struct MdctTables {
     /// Mixed-radix digit-reversal permutation tables for `n4 = 480, 240, 120, 60` (`shift = 0..=3`).
     bitrev: [[u16; MDCT_MAX_N4]; 4],
     /// MDCT pre/post-rotation cosine/sine twiddles for `shift = 0..=3`:
-    /// `trig[shift][i] = cos(2 * pi * (i + 0.125) / n)` and
-    /// `trig[shift][n4 + i] = -sin(2 * pi * (i + 0.125) / n)` where `n = 1920 >> shift`.
-    trig: [[f32; 2 * MDCT_MAX_N4]; 4],
+    /// `trig[shift][i] = Complex32::new(cos(theta), -sin(theta))` where
+    /// `theta = 2 * pi * (i + 0.125) / n` and `n = 1920 >> shift`.
+    trig: [[Complex32; MDCT_MAX_N4]; 4],
 }
 
 /// Initializes and returns the singleton [`MdctTables`] for 48 kHz CELT.
@@ -35,17 +35,16 @@ fn mdct_tables() -> &'static MdctTables {
         });
 
         let mut bitrev = [[0u16; MDCT_MAX_N4]; 4];
-        let mut trig = [[0.0f32; 2 * MDCT_MAX_N4]; 4];
+        let mut trig = [[Complex32::default(); MDCT_MAX_N4]; 4];
 
         for shift in 0..4 {
             let n = MDCT_MAX_N >> shift;
             let n4 = n >> 2;
             MixedRadixPlan::for_shift(shift).digit_reversal(&mut bitrev[shift][..n4]);
 
-            for i in 0..n4 {
+            for (i, slot) in trig[shift][..n4].iter_mut().enumerate() {
                 let angle = (2.0 * std::f64::consts::PI * ((i as f64) + 0.125)) / (n as f64);
-                trig[shift][i] = angle.cos() as f32;
-                trig[shift][n4 + i] = (-angle.sin()) as f32;
+                *slot = Complex32::new(angle.cos() as f32, (-angle.sin()) as f32);
             }
         }
 
@@ -53,117 +52,139 @@ fn mdct_tables() -> &'static MdctTables {
     });
 }
 
-/// Computes one CELT inverse MDCT block and applies the symmetric 120-sample TDAC window with
-/// overlap-add ([RFC 6716 Section 4.3.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7>)).
+/// Computes one unwindowed CELT inverse MDCT block of `n2 = (MDCT_MAX_N >> shift) / 2` samples
+/// into `out_unwindowed[..n2]`
+/// ([RFC 6716 Section 4.3.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7>)).
 ///
-/// # Parameters
-/// - `input`: Frequency-domain MDCT coefficients. Read with step `stride` (`n2 = 960 >> shift`
-///   coefficients at indices `0, stride, 2 * stride, ..., (n2 - 1) * stride`).
-/// - `out`: Time-domain synthesis buffer of length at least `n2 + OVERLAP / 2` (`n2 + 60`).
-///   On entry, `out[0 .. OVERLAP / 2]` (`out[0..60]`) MUST contain the unwindowed tail from the
-///   previous MDCT block. On return, `out[0 .. n2]` contains the completed, overlapped time-domain
-///   samples for this block, and `out[n2 .. n2 + OVERLAP / 2]` (`out[n2 .. n2 + 60]`) holds the
-///   new unwindowed tail for the next block.
-/// - `window`: The 120-sample symmetric power-complementary MDCT window ([`CELT_WINDOW`]).
-/// - `shift`: Block-size right-shift (`0..=3`, where `shift = 3 - lm` for a single long block
-///   of `n2 = 120 << lm` bins, or `shift = 3` for transient short blocks of `n2 = 120` bins).
-/// - `stride`: Input stride (`1` for non-transient frames, or `B = 1 << lm` for interleaved
-///   transient short blocks).
-pub(crate) fn imdct_overlap_add(
+/// Dispatches `shift` (`0..=3`) to a const-generic `N4` kernel so `fft_buf` only zeroes `N4`
+/// complex points (`480 B` on short transient blocks instead of `3,840 B`).
+#[inline]
+fn imdct_unwindowed(
     input: &[f32],
-    out: &mut [f32],
-    window: &[f32; OVERLAP],
+    out_unwindowed: &mut [f32],
     shift: usize,
     stride: usize,
+    tables: &MdctTables,
 ) {
     debug_assert!(shift <= 3);
-    let tables = mdct_tables();
-    let n = MDCT_MAX_N >> shift;
-    let n2 = n >> 1;
-    let n4 = n >> 2;
-    let half_overlap = OVERLAP >> 1;
-
-    debug_assert!(out.len() >= n2 + half_overlap);
-    debug_assert!(input.len() > (n2 - 1) * stride);
-
-    let trig = &tables.trig[shift];
-
-    // Step 1: Pre-rotate input frequency coefficients and scatter into the digit-reversed buffer.
-    let mut fft_buf = [Complex32::default(); MDCT_MAX_N4];
-    pre_rotate(input, stride, n4, trig, &tables.bitrev[shift], &mut fft_buf);
-
-    // Step 2: Quarter-length (`N / 4`) mixed-radix complex FFT.
-    MixedRadixPlan::for_shift(shift).execute(&mut fft_buf[..n4], &tables.fft_twiddles);
-
-    // Step 3: Post-rotate and de-interleave into `out[half_overlap .. half_overlap + n2]`.
-    post_rotate(&fft_buf[..n4], trig, &mut out[half_overlap..half_overlap + n2]);
-
-    // Step 4: Symmetric TDAC windowing and overlap-add on `out[0 .. OVERLAP]`.
-    window_overlap_add(&mut out[..OVERLAP], window);
-    return;
-}
-
-/// Pre-rotates the `n2 = 2 * n4` strided MDCT coefficients of `input` into the quarter-length
-/// complex buffer `fft_buf`, scattered through the digit-reversal table `bitrev`.
-///
-/// Real and imaginary components are swapped (`Complex32::new(yi, yr)`) so that the forward
-/// complex DFT of [`MixedRadixPlan::execute`] computes an unscaled inverse DFT.
-fn pre_rotate(
-    input: &[f32],
-    stride: usize,
-    n4: usize,
-    trig: &[f32],
-    bitrev: &[u16],
-    fft_buf: &mut [Complex32; MDCT_MAX_N4],
-) {
-    let n2 = 2 * n4;
-    let stride2 = 2 * stride;
-    for i in 0..n4 {
-        let x1 = input[i * stride2];
-        let x2 = input[(n2 - 1 - 2 * i) * stride];
-        let t_cos = trig[i];
-        let t_sin = trig[n4 + i];
-
-        let yr = x2 * t_cos + x1 * t_sin;
-        let yi = x1 * t_cos - x2 * t_sin;
-        let rev = usize::from(bitrev[i]);
-        fft_buf[rev] = Complex32::new(yi, yr);
+    match shift {
+        0 => imdct_unwindowed_n4::<480>(input, out_unwindowed, 0, stride, tables),
+        1 => imdct_unwindowed_n4::<240>(input, out_unwindowed, 1, stride, tables),
+        2 => imdct_unwindowed_n4::<120>(input, out_unwindowed, 2, stride, tables),
+        _ => imdct_unwindowed_n4::<60>(input, out_unwindowed, 3, stride, tables),
     }
     return;
 }
 
-/// Post-rotates the transformed quarter-length buffer `fft_buf[..n4]` and de-interleaves the
-/// `n2 = 2 * n4` time-domain samples into `out[..n2]`.
-fn post_rotate(fft_buf: &[Complex32], trig: &[f32], out: &mut [f32]) {
-    let n4 = fft_buf.len();
-    let n2 = 2 * n4;
-    let half_n4 = (n4 + 1) >> 1;
-    for i in 0..half_n4 {
-        let j = n4 - 1 - i;
+/// Size-specialized quarter-length (`N4`) unwindowed inverse MDCT kernel.
+fn imdct_unwindowed_n4<const N4: usize>(
+    input: &[f32],
+    out_unwindowed: &mut [f32],
+    shift: usize,
+    stride: usize,
+    tables: &MdctTables,
+) {
+    let n2 = 2 * N4;
+    debug_assert_eq!(MDCT_MAX_N4 >> shift, N4);
+    debug_assert!(out_unwindowed.len() >= n2);
+    debug_assert!(input.len() > (n2 - 1) * stride);
 
+    let trig = &tables.trig[shift];
+    let bitrev = &tables.bitrev[shift];
+
+    // Step 1: Pre-rotate input frequency coefficients and scatter into the digit-reversed buffer.
+    let mut fft_buf = [Complex32::default(); N4];
+    pre_rotate::<N4>(input, stride, trig, bitrev, &mut fft_buf);
+
+    // Step 2: Quarter-length (`N / 4`) mixed-radix complex FFT.
+    MixedRadixPlan::for_shift(shift).execute(&mut fft_buf, &tables.fft_twiddles);
+
+    // Step 3: Post-rotate and de-interleave into `out_unwindowed[..n2]`.
+    post_rotate::<N4>(&fft_buf, trig, &mut out_unwindowed[..n2]);
+    return;
+}
+
+/// Pre-rotates the `2 * N4` strided MDCT coefficients of `input` into the quarter-length
+/// complex buffer `fft_buf`, scattered through the digit-reversal table `bitrev`.
+///
+/// Real and imaginary components are swapped (`Complex32::new(yi, yr)`) so that the forward
+/// complex DFT of [`MixedRadixPlan::execute`] computes an unscaled inverse DFT.
+#[inline]
+fn pre_rotate<const N4: usize>(
+    input: &[f32],
+    stride: usize,
+    trig: &[Complex32; MDCT_MAX_N4],
+    bitrev: &[u16; MDCT_MAX_N4],
+    fft_buf: &mut [Complex32; N4],
+) {
+    let n2 = 2 * N4;
+    if stride == 1 {
+        let coeffs = &input[..n2];
+        for (((pair, rev_pair), &t), &rev) in coeffs
+            .chunks_exact(2)
+            .zip(coeffs.chunks_exact(2).rev())
+            .zip(&trig[..N4])
+            .zip(&bitrev[..N4])
+        {
+            let x1 = pair[0];
+            let x2 = rev_pair[1];
+            let yr = x2 * t.r + x1 * t.i;
+            let yi = x1 * t.r - x2 * t.i;
+            fft_buf[usize::from(rev)] = Complex32::new(yi, yr);
+        }
+        return;
+    }
+
+    let stride2 = 2 * stride;
+    for (i, (&t, &rev)) in trig[..N4].iter().zip(&bitrev[..N4]).enumerate() {
+        let x1 = input[i * stride2];
+        let x2 = input[(n2 - 1 - 2 * i) * stride];
+        let yr = x2 * t.r + x1 * t.i;
+        let yi = x1 * t.r - x2 * t.i;
+        fft_buf[usize::from(rev)] = Complex32::new(yi, yr);
+    }
+    return;
+}
+
+/// Post-rotates the transformed quarter-length buffer `fft_buf` and de-interleaves the
+/// `2 * N4` time-domain samples into `out[..2 * N4]`.
+#[inline]
+fn post_rotate<const N4: usize>(
+    fft_buf: &[Complex32; N4],
+    trig: &[Complex32; MDCT_MAX_N4],
+    out: &mut [f32],
+) {
+    let half_n4 = N4 / 2;
+    let n2 = 2 * N4;
+    debug_assert_eq!(half_n4 * 2, N4);
+
+    let (fft_front, fft_back) = fft_buf.split_at(half_n4);
+    let (trig_front, trig_back) = trig[..N4].split_at(half_n4);
+    let (front_out, back_out) = out[..n2].split_at_mut(N4);
+
+    for (((((&c0, &c1), &t0), &t1), front_pair), back_pair) in fft_front
+        .iter()
+        .zip(fft_back.iter().rev())
+        .zip(trig_front.iter())
+        .zip(trig_back.iter().rev())
+        .zip(front_out.chunks_exact_mut(2))
+        .zip(back_out.chunks_exact_mut(2).rev())
+    {
         // Swap real/imag back from the forward-FFT conjugation trick: `re = c.i`, `im = c.r`.
-        let c0 = fft_buf[i];
         let re0 = c0.i;
         let im0 = c0.r;
-
-        let c1 = fft_buf[j];
         let re1 = c1.i;
         let im1 = c1.r;
 
-        let t0_cos = trig[i];
-        let t0_sin = trig[n4 + i];
-        let t1_cos = trig[j];
-        let t1_sin = trig[n4 + j];
+        let yr0 = re0 * t0.r + im0 * t0.i;
+        let yi0 = re0 * t0.i - im0 * t0.r;
+        let yr1 = re1 * t1.r + im1 * t1.i;
+        let yi1 = re1 * t1.i - im1 * t1.r;
 
-        let yr0 = re0 * t0_cos + im0 * t0_sin;
-        let yi0 = re0 * t0_sin - im0 * t0_cos;
-        let yr1 = re1 * t1_cos + im1 * t1_sin;
-        let yi1 = re1 * t1_sin - im1 * t1_cos;
-
-        out[2 * i] = yr0;
-        out[2 * i + 1] = yi1;
-        out[n2 - 2 - 2 * i] = yr1;
-        out[n2 - 1 - 2 * i] = yi0;
+        front_pair[0] = yr0;
+        front_pair[1] = yi1;
+        back_pair[0] = yr1;
+        back_pair[1] = yi0;
     }
     return;
 }
@@ -172,16 +193,19 @@ fn post_rotate(fft_buf: &[Complex32], trig: &[f32], out: &mut [f32]) {
 ///
 /// On entry, `out[0 .. OVERLAP / 2]` holds the previous block's unwindowed tail and
 /// `out[OVERLAP / 2 .. OVERLAP]` holds the newly synthesized leading half-overlap.
+#[inline]
 fn window_overlap_add(out: &mut [f32], window: &[f32; OVERLAP]) {
-    let half_overlap = OVERLAP >> 1;
-    for i in 0..half_overlap {
-        let x1 = out[OVERLAP - 1 - i];
-        let x2 = out[i];
-        let w1 = window[i];
-        let w2 = window[OVERLAP - 1 - i];
+    let half_overlap = OVERLAP / 2;
+    let (front, back) = out[..OVERLAP].split_at_mut(half_overlap);
+    let (w_front, w_back) = window.split_at(half_overlap);
 
-        out[i] = x2 * w2 - x1 * w1;
-        out[OVERLAP - 1 - i] = x2 * w1 + x1 * w2;
+    for (((front_slot, back_slot), &w1), &w2) in
+        front.iter_mut().zip(back.iter_mut().rev()).zip(w_front.iter()).zip(w_back.iter().rev())
+    {
+        let x1 = *back_slot;
+        let x2 = *front_slot;
+        *front_slot = x2 * w2 - x1 * w1;
+        *back_slot = x2 * w1 + x1 * w2;
     }
     return;
 }
@@ -202,9 +226,62 @@ pub(crate) fn mdct_backward_frame(
 ) {
     let (block, count) = if is_transient { (BlockSize::new(0), lm.blocks()) } else { (lm, 1) };
     let shift = MAX_LM - block.log2();
+    let n2 = (MDCT_MAX_N >> shift) >> 1;
+    let half_overlap = OVERLAP >> 1;
+    let tables = mdct_tables();
+
     for i in 0..count {
         let out = &mut out_syn[(i * SHORT_MDCT_SIZE)..];
-        imdct_overlap_add(&freq[i..], out, &CELT_WINDOW, shift, count);
+        imdct_unwindowed(
+            &freq[i..],
+            &mut out[half_overlap..half_overlap + n2],
+            shift,
+            count,
+            tables,
+        );
+        window_overlap_add(&mut out[..OVERLAP], &CELT_WINDOW);
+    }
+    return;
+}
+
+/// Inverse-transforms a single mono MDCT spectrum `freq` into both `left_syn` and `right_syn`
+/// with independent per-channel overlap-add
+/// ([RFC 6716 Section 4.3.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.7>)).
+///
+/// Evaluates the unwindowed inverse MDCT once per block into `left_syn`, copies the `n2`
+/// unwindowed samples into `right_syn`, and applies [`window_overlap_add`] separately so each
+/// channel overlaps against its own prior 60-sample tail while sharing the newly synthesized
+/// unwindowed tail across subsequent blocks (including transient short-block cascades).
+pub(crate) fn mdct_backward_frame_dual(
+    freq: &[f32],
+    left_syn: &mut [f32],
+    right_syn: &mut [f32],
+    lm: BlockSize,
+    is_transient: bool,
+) {
+    let (block, count) = if is_transient { (BlockSize::new(0), lm.blocks()) } else { (lm, 1) };
+    let shift = MAX_LM - block.log2();
+    let n2 = (MDCT_MAX_N >> shift) >> 1;
+    let half_overlap = OVERLAP >> 1;
+    let tables = mdct_tables();
+
+    for i in 0..count {
+        let offset = i * SHORT_MDCT_SIZE;
+        let left = &mut left_syn[offset..];
+        let right = &mut right_syn[offset..];
+
+        imdct_unwindowed(
+            &freq[i..],
+            &mut left[half_overlap..half_overlap + n2],
+            shift,
+            count,
+            tables,
+        );
+        right[half_overlap..half_overlap + n2]
+            .copy_from_slice(&left[half_overlap..half_overlap + n2]);
+
+        window_overlap_add(&mut left[..OVERLAP], &CELT_WINDOW);
+        window_overlap_add(&mut right[..OVERLAP], &CELT_WINDOW);
     }
     return;
 }
