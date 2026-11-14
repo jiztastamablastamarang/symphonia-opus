@@ -89,11 +89,16 @@ pub(crate) struct Cdf<'a> {
 }
 
 impl<'a> Cdf<'a> {
-    /// Builds a table, or returns `None` when it is not a well-formed cumulative distribution:
-    /// fewer than two entries, a zero total, a decreasing bound, or a last bound that differs
-    /// from the total.
+    /// Builds a table, or returns `None` when it is not a well-formed Opus cumulative
+    /// distribution: fewer than two entries, a non-power-of-two total (`2^ftb` in
+    /// [RFC 6716 Section 4.1.3.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.3.3>)),
+    /// a zero initial bound, a decreasing bound, or a last bound that differs from the total.
     pub(crate) const fn try_new(table: &'a [u32]) -> Option<Self> {
-        if table.len() < 2 || table[0] == 0 || table[table.len() - 1] != table[0] {
+        if table.len() < 2
+            || !table[0].is_power_of_two()
+            || table[1] == 0
+            || table[table.len() - 1] != table[0]
+        {
             return None;
         }
         let mut i = 2;
@@ -231,36 +236,54 @@ impl<'a> Decoder<'a> {
 
     /// Bits used so far in 1/8 bit units (`Q3`), a finer count than [`Decoder::tell`]
     /// ([RFC 6716 Section 4.1.6.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.6.2>)).
+    #[inline]
     pub(crate) fn tell_frac(&self) -> u32 {
         const THRESHOLDS_Q15: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
+        const OCTANT_MASK: u32 = 7;
 
         let total_bits_q3 = (self.total_bits_read as u32) << FRACTIONAL_BIT_RESOLUTION;
         let range_bits = bit_width(self.range);
         let normalized_range_q15 = self.range >> (range_bits - NORMALIZED_RANGE_BITS);
 
-        let mut frac_octant = (normalized_range_q15 >> OCTANT_SHIFT) - FIRST_OCTANT;
-        if normalized_range_q15 > THRESHOLDS_Q15[frac_octant as usize] {
-            frac_octant += 1;
-        }
+        let octant = ((normalized_range_q15 >> OCTANT_SHIFT) - FIRST_OCTANT) & OCTANT_MASK;
+        let frac_octant =
+            octant + u32::from(normalized_range_q15 > THRESHOLDS_Q15[octant as usize]);
 
         let remaining_range_q3 = (range_bits << FRACTIONAL_BIT_RESOLUTION) + frac_octant;
         return total_bits_q3 - remaining_range_q3;
     }
 
-    /// Decodes one symbol from `cdf` and returns its index `k`, the symbol whose interval
-    /// `[fl[k], fh[k])` holds the decoded frequency `fs`, then narrows `(val, rng)` to it
+    /// Decodes one symbol from `cdf` and returns its index `k`, the first symbol whose upper
+    /// bound `fh[k]` satisfies `val >= (rng >> ftb) * (ft - fh[k])`, then narrows `(val, rng)`
+    /// to it without integer division
     /// ([RFC 6716 Section 4.1.3.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.3.3>)).
     ///
-    /// The table is validated when built, so the search always terminates on a bound: the last
-    /// bound equals the total and the target is always below it.
+    /// Because [`Cdf`] validates `ft = 2^ftb`, `fh[0] > 0`, and `fh[n - 1] == ft` at construction,
+    /// `fh[k] > ft - min(val / scale + 1, ft)` is algebraically identical to
+    /// `val >= scale * (ft - fh[k])` and terminates at or before the final symbol (`top_offset == 0`).
+    #[inline]
     pub(crate) fn decode_symbol(&mut self, cdf: Cdf<'_>) -> Result<u32> {
+        let total = cdf.total();
+        let scale = self.range >> total.trailing_zeros();
         let bounds = cdf.bounds();
-        let symbol = self.decode_with(cdf.total(), |frequency| {
-            let i = bounds.iter().position(|&high| high > frequency).unwrap_or(bounds.len() - 1);
-            let low = i.checked_sub(1).map_or(0, |prev| bounds[prev]);
-            return (i as u32, low, bounds[i]);
-        });
-        return Ok(symbol);
+        let last_symbol = bounds.len() - 1;
+        let val = self.value;
+        let mut prev_top = self.range;
+
+        for (i, &high) in bounds[..last_symbol].iter().enumerate() {
+            let top_offset = scale * (total - high);
+            if val >= top_offset {
+                self.value = val - top_offset;
+                self.range = prev_top - top_offset;
+                self.normalize();
+                return Ok(i as u32);
+            }
+            prev_top = top_offset;
+        }
+
+        self.range = prev_top;
+        self.normalize();
+        return Ok(last_symbol as u32);
     }
 
     /// Decodes one symbol of a distribution of total frequency `total` whose intervals `locate`
@@ -283,6 +306,7 @@ impl<'a> Decoder<'a> {
 
     /// Decodes one binary symbol whose probability of being `1` is `2^-logp`
     /// ([RFC 6716 Section 4.1.3.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.3.2>)).
+    #[inline]
     pub(crate) fn decode_symbol_logp(&mut self, logp: u32) -> Result<u32> {
         let split = self.range >> logp;
         let is_one = self.value < split;
@@ -297,6 +321,7 @@ impl<'a> Decoder<'a> {
     /// Reads `bits` (at most 25) raw bits, which bypass the range decoder and are packed from the
     /// end of the frame toward the front, least significant bit first
     /// ([RFC 6716 Section 4.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.4>)).
+    #[inline]
     pub(crate) fn decode_raw_bits(&mut self, bits: u32) -> Result<u32> {
         if bits > MAX_RAW_BITS_PER_CALL {
             return Err(Error::DecodeError("opus: raw bit count exceeds maximum of 25"));
@@ -329,6 +354,7 @@ impl<'a> Decoder<'a> {
     /// A combined value above `total - 1` means a corrupt bitstream; it is clamped here, as the
     /// normative decoder does, and the corruption surfaces as a bit budget overrun at the frame
     /// boundary rather than as an error at this call.
+    #[inline]
     pub(crate) fn decode_uint(&mut self, total: u32) -> Result<u32> {
         if total <= 1 {
             return Err(Error::DecodeError("opus: decode_uint requires total > 1"));
@@ -447,9 +473,11 @@ impl<'a> Decoder<'a> {
     /// past the end of the frame it returns zero.
     #[inline]
     fn read_next_byte(&mut self) -> u8 {
-        let byte = self.data.get(self.forward_bytes_read).copied().unwrap_or(0);
-        self.forward_bytes_read = self.forward_bytes_read.saturating_add(1);
-        return byte;
+        if let Some(&byte) = self.data.get(self.forward_bytes_read) {
+            self.forward_bytes_read += 1;
+            return byte;
+        }
+        return 0;
     }
 
     /// Reads the next raw-bit byte, moving from the end of the frame toward the front
@@ -457,16 +485,11 @@ impl<'a> Decoder<'a> {
     /// once every byte has been read it returns zero.
     #[inline]
     fn read_byte_from_end(&mut self) -> u8 {
-        let next_offset = self.backward_bytes_read.saturating_add(1);
-        let byte = self
-            .data
-            .len()
-            .checked_sub(next_offset)
-            .and_then(|i| self.data.get(i))
-            .copied()
-            .unwrap_or(0);
-        self.backward_bytes_read = next_offset;
-        return byte;
+        if let Some(i) = self.data.len().checked_sub(self.backward_bytes_read + 1) {
+            self.backward_bytes_read += 1;
+            return self.data[i];
+        }
+        return 0;
     }
 }
 
