@@ -246,11 +246,20 @@ pub(crate) fn bits2pulses_at_level(level: CacheLevel, band: usize, bits: i32) ->
     let cache = pulse_cache(level, band);
     let max_pseudo = usize::from(cache[0]);
     debug_assert!(max_pseudo <= MAX_PSEUDO);
+    if bits <= 0 || max_pseudo == 0 {
+        return 0;
+    }
     let target = bits - 1;
+    if target > i32::from(cache[max_pseudo]) {
+        return max_pseudo as i32;
+    }
 
-    // `cache[1..=max_pseudo]` is non-decreasing: `lo` is the last index below the target and
-    // `hi` the first at or above it (or `max_pseudo` when no entry reaches the target).
-    let lo = cache[1..=max_pseudo].partition_point(|&cost| i32::from(cost) < target);
+    // `0 <= target <= cache[max_pseudo] <= u8::MAX`, and `cache[1..=max_pseudo]` is
+    // non-decreasing, so counting entries below `target_u8` finds the partition point
+    // branchlessly (`lo < max_pseudo`).
+    let target_u8 = target as u8;
+    let lo =
+        cache[1..=max_pseudo].iter().fold(0usize, |acc, &cost| acc + usize::from(cost < target_u8));
     let hi = (lo + 1).min(max_pseudo);
 
     let lo_bits = if lo == 0 { -1 } else { i32::from(cache[lo]) };
@@ -556,12 +565,19 @@ struct BandLimits<'a> {
 impl<'a> BandLimits<'a> {
     /// Computes the thresholds and trim offsets of the coded bands.
     fn new(layout: AllocationLayout, budget: AllocationBudget<'a>) -> Self {
-        let coded = |j: usize| layout.bands().contains(&j);
-        let thresh = std::array::from_fn(|j| if coded(j) { shape_threshold(layout, j) } else { 0 });
-        let trim_offset = std::array::from_fn(|j| {
-            if coded(j) { trim_offset(layout, budget.alloc_trim, j) } else { 0 }
-        });
-        return Self { layout, cap: budget.cap, offsets: budget.offsets, thresh, trim_offset };
+        let mut thresh = [0i32; MAX_BANDS];
+        let mut trim_offsets = [0i32; MAX_BANDS];
+        for j in layout.bands() {
+            thresh[j] = shape_threshold(layout, j);
+            trim_offsets[j] = trim_offset(layout, budget.alloc_trim, j);
+        }
+        return Self {
+            layout,
+            cap: budget.cap,
+            offsets: budget.offsets,
+            thresh,
+            trim_offset: trim_offsets,
+        };
     }
 
     /// Static allocation of `row` for band `j` in `1/8` bits before trim and boosts:
@@ -626,26 +642,18 @@ impl InterpolationCurve {
     fn new(limits: &BandLimits<'_>, over_row: usize) -> Self {
         let layout = limits.layout;
         let under_row = over_row - 1;
-        let coded = |j: usize| layout.bands().contains(&j);
-        let lower = std::array::from_fn(|j| {
-            if !coded(j) {
-                return 0;
-            }
-            let bits = limits.trimmed(limits.static_bits(&ALLOC_VECTORS[under_row], j), j);
-            if under_row > 0 {
-                return bits + limits.offsets[j];
-            }
-            return bits;
-        });
-        let delta = std::array::from_fn(|j| {
-            if !coded(j) {
-                return 0;
-            }
-            let raw =
-                ALLOC_VECTORS.get(over_row).map_or(limits.cap[j], |row| limits.static_bits(row, j));
+        let under_vec = &ALLOC_VECTORS[under_row];
+        let over_vec = ALLOC_VECTORS.get(over_row);
+        let mut lower = [0i32; MAX_BANDS];
+        let mut delta = [0i32; MAX_BANDS];
+        for j in layout.bands() {
+            let base = limits.trimmed(limits.static_bits(under_vec, j), j);
+            let low = if under_row > 0 { base + limits.offsets[j] } else { base };
+            let raw = over_vec.map_or(limits.cap[j], |row| limits.static_bits(row, j));
             let upper = limits.trimmed(raw, j) + limits.offsets[j];
-            return (upper - lower[j]).max(0);
-        });
+            lower[j] = low;
+            delta[j] = (upper - low).max(0);
+        }
         let skip_start =
             layout.bands().rev().find(|&j| limits.offsets[j] > 0).unwrap_or(layout.start);
         return Self { lower, delta, skip_start };
@@ -657,12 +665,17 @@ impl InterpolationCurve {
     }
 
     /// Largest interpolation weight (`0..64`) whose total fits `total`. Totals are non-decreasing
-    /// in the weight, so the search is a partition point.
+    /// in the weight, so a six-step binary search finds the partition point without allocating an
+    /// index array.
     fn weight_within(&self, limits: &BandLimits<'_>, total: i32) -> i32 {
-        let weights: [i32; 1 << ALLOC_STEPS] = std::array::from_fn(|i| i as i32);
-        return weights[1..]
-            .partition_point(|&weight| limits.curve_total(|j| self.at(weight, j)) <= total)
-            as i32;
+        let mut lo = 0i32;
+        let mut hi = 1i32 << ALLOC_STEPS;
+        while hi - lo > 1 {
+            let mid = (lo + hi) >> 1;
+            let fits = limits.curve_total(|j| self.at(mid, j)) <= total;
+            (lo, hi) = if fits { (mid, hi) } else { (lo, mid) };
+        }
+        return lo;
     }
 
     /// Per-band allocation at `weight` with thresholds, floor and caps applied, and its total.

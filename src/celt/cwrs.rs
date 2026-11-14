@@ -173,12 +173,7 @@ pub(crate) static PVQ_U_DATA: [u32; 1272] = [
 #[inline]
 pub(crate) const fn pvq_count_u(n: usize, k: usize) -> u32 {
     let (row, col) = if n < k { (n, k) } else { (k, n) };
-    return match row {
-        0 => (col == 0) as u32,
-        1 => 1,
-        2 => (2 * col - 1) as u32,
-        _ => PVQ_U_DATA[PVQ_U_ROW_START[row] + (col - row)],
-    };
+    return PVQ_U_DATA[PVQ_U_ROW_START[row] + (col - row)];
 }
 
 /// The number of codewords `V(n, k) = U(n, k) + U(n, k + 1)`: the `n`-dimensional integer
@@ -189,40 +184,116 @@ pub(crate) const fn pvq_count_v(n: usize, k: usize) -> u32 {
     return pvq_count_u(n, k).wrapping_add(pvq_count_u(n, k + 1));
 }
 
+/// Unranks one coordinate when `rem_pulses >= dim` (`dim >= 3`, `dim <= 14`), returning
+/// `(signed_pulse, next_pulses, remaining_index)`
+/// ([RFC 6716 Section 4.3.4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.2>)).
+#[inline]
+fn unrank_dense_coordinate(dim: usize, rem_pulses: usize, mut index: u32) -> (i32, usize, u32) {
+    let row = &PVQ_U_DATA[PVQ_U_ROW_START[dim]..];
+    let neg_threshold = row[rem_pulses + 1 - dim];
+    let is_negative = index >= neg_threshold;
+    if is_negative {
+        index -= neg_threshold;
+    }
+
+    let (next_pulses, u_next) = match index >= row[0] {
+        true => {
+            let offset = row[..=rem_pulses - dim].iter().rposition(|&u| u <= index).unwrap_or(0);
+            (dim + offset, row[offset])
+        }
+        false => (1..dim)
+            .rev()
+            .map(|m| (m, PVQ_U_DATA[PVQ_U_ROW_START[m] + (dim - m)]))
+            .find(|&(_, u)| u <= index)
+            .unwrap_or((0, 0)),
+    };
+
+    let magnitude = (rem_pulses - next_pulses) as i32;
+    let pulse = if is_negative { -magnitude } else { magnitude };
+    return (pulse, next_pulses, index - u_next);
+}
+
+/// Unranks one coordinate when `0 < rem_pulses < dim` (`dim >= 3`), returning
+/// `(signed_pulse, next_pulses, remaining_index)`
+/// ([RFC 6716 Section 4.3.4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.2>)).
+#[inline]
+fn unrank_sparse_coordinate(dim: usize, rem_pulses: usize, mut index: u32) -> (i32, usize, u32) {
+    let u_same = PVQ_U_DATA[PVQ_U_ROW_START[rem_pulses] + (dim - rem_pulses)];
+    let neg_threshold = PVQ_U_DATA[PVQ_U_ROW_START[rem_pulses + 1] + (dim - rem_pulses - 1)];
+    if (u_same..neg_threshold).contains(&index) {
+        return (0, rem_pulses, index - u_same);
+    }
+
+    let is_negative = index >= neg_threshold;
+    if is_negative {
+        index -= neg_threshold;
+    }
+
+    let (next_pulses, u_next) = (1..rem_pulses)
+        .rev()
+        .map(|m| (m, PVQ_U_DATA[PVQ_U_ROW_START[m] + (dim - m)]))
+        .find(|&(_, u)| u <= index)
+        .unwrap_or((0, 0));
+
+    let magnitude = (rem_pulses - next_pulses) as i32;
+    let pulse = if is_negative { -magnitude } else { magnitude };
+    return (pulse, next_pulses, index - u_next);
+}
+
 /// Unpacks the codeword index `index` (below `V(n, k)`) into the `n`-dimensional pulse vector
 /// `y[..n]` and returns its squared norm `y[0]^2 + ... + y[n - 1]^2`
 /// ([RFC 6716 Section 4.3.4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.2>)).
 pub(crate) fn decode_pulse_vector(n: usize, k: usize, mut index: u32, y: &mut [i32]) -> f32 {
     debug_assert!(n >= 1 && y.len() >= n);
-    let mut rem_pulses = k;
-    let mut energy = 0.0f32;
-
-    for (dim, out_pulse) in (1..=n).rev().zip(y[..n].iter_mut()) {
-        // Codewords with y_j >= 0 occupy [0, U(dim, rem_pulses + 1)), and codewords
-        // with y_j < 0 occupy [U(dim, rem_pulses + 1), V(dim, rem_pulses)).
-        let neg_threshold = pvq_count_u(dim, rem_pulses + 1);
-        let is_negative = index >= neg_threshold;
-        if is_negative {
-            index -= neg_threshold;
-        }
-
-        // Find the largest number of remaining pulses `next_pulses` in `0..=rem_pulses`
-        // whose cumulative offset U(dim, next_pulses) does not exceed `index`.
-        let next_pulses = match dim {
-            1 => 0,
-            2 => ((index + 1) >> 1) as usize,
-            _ => (0..=rem_pulses).rev().find(|&m| pvq_count_u(dim, m) <= index).unwrap_or(0),
-        };
-
-        index -= pvq_count_u(dim, next_pulses);
-        let magnitude = (rem_pulses - next_pulses) as i32;
-        let signed_pulse = if is_negative { -magnitude } else { magnitude };
-        *out_pulse = signed_pulse;
-        energy += (signed_pulse as f32) * (signed_pulse as f32);
-        rem_pulses = next_pulses;
+    let y = &mut y[..n];
+    if n == 1 {
+        let magnitude = k as i32;
+        y[0] = if index != 0 { -magnitude } else { magnitude };
+        return ((k as u64) * (k as u64)) as f32;
     }
 
-    return energy;
+    let mut rem_pulses = k;
+    let mut norm_sq = 0u64;
+
+    for i in 0..(n - 2) {
+        if rem_pulses == 0 {
+            y[i..].fill(0);
+            return norm_sq as f32;
+        }
+
+        let dim = n - i;
+        let (pulse, next_pulses, next_index) = match rem_pulses >= dim {
+            true => unrank_dense_coordinate(dim, rem_pulses, index),
+            false => unrank_sparse_coordinate(dim, rem_pulses, index),
+        };
+        y[i] = pulse;
+        index = next_index;
+        if pulse != 0 {
+            let mag = pulse.unsigned_abs() as u64;
+            norm_sq += mag * mag;
+            rem_pulses = next_pulses;
+        }
+    }
+
+    // Closed-form unranking of the final two coordinates (`dim == 2` and `dim == 1`).
+    let neg_threshold_2 = (2 * rem_pulses + 1) as u32;
+    let is_neg_2 = index >= neg_threshold_2;
+    if is_neg_2 {
+        index -= neg_threshold_2;
+    }
+    let last_pulses = ((index + 1) >> 1) as usize;
+    if last_pulses > 0 {
+        index -= (2 * last_pulses - 1) as u32;
+    }
+    let mag_2 = (rem_pulses - last_pulses) as i32;
+    y[n - 2] = if is_neg_2 { -mag_2 } else { mag_2 };
+    norm_sq += (mag_2.unsigned_abs() as u64) * (mag_2.unsigned_abs() as u64);
+
+    let mag_1 = last_pulses as i32;
+    y[n - 1] = if index != 0 { -mag_1 } else { mag_1 };
+    norm_sq += (last_pulses as u64) * (last_pulses as u64);
+
+    return norm_sq as f32;
 }
 
 /// Decodes a `k`-pulse codeword in `n` dimensions from `dec` into `y[..n]` and returns its
