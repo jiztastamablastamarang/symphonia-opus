@@ -423,37 +423,37 @@ impl StreamDecoder {
         return self.layout.is_stereo();
     }
 
-    /// Decodes every frame of `packet` back to back into the `scratch` rows and returns the
-    /// samples written per channel.
+    /// Decodes every frame of `packet` back to back into `out` and returns the samples written
+    /// per channel.
     pub(crate) fn decode_packet(
         &mut self,
         packet: &FramePacket<'_>,
-        scratch: &mut [[f32; MAX_PACKET_SAMPLES_48K]; 2],
+        mut out: Planes<'_>,
     ) -> Result<usize> {
+        debug_assert_eq!(out.is_stereo(), self.is_stereo());
         let config = FrameConfig::from(packet);
         let samples_per_frame = self.sample_rate.samples_per(config.duration);
-        let mut pcm = Planes::from_rows(scratch, self.is_stereo());
 
         return packet.frames.iter().try_fold(0usize, |offset, &frame| {
             let written = self.decode_frame(
                 Some(frame),
                 config,
-                pcm.range(offset..(offset + samples_per_frame)),
+                out.range(offset..(offset + samples_per_frame)),
             )?;
             return Ok(offset + written);
         });
     }
 
-    /// Conceals a lost packet of `duration` into the `scratch` rows
+    /// Conceals a lost packet of `duration` into `out`
     /// ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
     pub(crate) fn conceal_lost_packet(
         &mut self,
         duration: FrameDuration,
-        scratch: &mut [[f32; MAX_PACKET_SAMPLES_48K]; 2],
+        mut out: Planes<'_>,
     ) -> Result<usize> {
+        debug_assert_eq!(out.is_stereo(), self.is_stereo());
         let samples = self.sample_rate.samples_per(duration);
-        let mut pcm = Planes::from_rows(scratch, self.is_stereo());
-        return self.conceal_frame(duration, pcm.range(..samples));
+        return self.conceal_frame(duration, out.range(..samples));
     }
 
     /// Conceals a lost or DTX frame of `duration`
@@ -484,11 +484,11 @@ impl StreamDecoder {
     ) -> Result<usize> {
         let samples = self.sample_rate.samples_per(duration);
         let mut out = out.range(..samples);
-        out.fill(0.0);
         self.range_final = 0;
 
         let Some(last) = self.last.as_mut()
         else {
+            out.fill(0.0);
             return Ok(samples);
         };
         // A redundant frame bridges two consecutive decoded frames (RFC 6716 Section 4.5.1):
@@ -570,19 +570,19 @@ impl StreamDecoder {
     }
 
     /// Conceals the first 5 ms of the frame (or all of a 2.5 ms frame) from the outgoing
-    /// decoders into `concealed`: the `P` of
+    /// decoders: the `P` of
     /// [RFC 6716 Section 4.5.3, Figure 19](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.3>).
     fn conceal_transition_tail(
         &mut self,
         samples: usize,
-        concealed: &mut [[f32; MAX_5MS_SAMPLES_48K]; 2],
-    ) -> Result<()> {
+    ) -> Result<[[f32; MAX_5MS_SAMPLES_48K]; 2]> {
+        let mut concealed = [[0.0_f32; MAX_5MS_SAMPLES_48K]; 2];
         let f2_5 = self.sample_rate.samples_per(FrameDuration::Ms2_5);
         let f5 = self.sample_rate.samples_per(FrameDuration::Ms5);
         let duration = if samples == f2_5 { FrameDuration::Ms2_5 } else { FrameDuration::Ms5 };
-        let mut out = Planes::from_rows(concealed, self.is_stereo());
+        let mut out = Planes::from_rows(&mut concealed, self.is_stereo());
         self.conceal_up_to_20ms(duration, out.range(..f5.min(samples)))?;
-        return Ok(());
+        return Ok(concealed);
     }
 
     /// Decodes one Opus frame of `config`, or conceals it when `frame` is absent, into `out`
@@ -604,33 +604,27 @@ impl StreamDecoder {
             return self.conceal_frame(config.duration, out);
         };
         let mut out = out.range(..samples);
-        out.fill(0.0);
 
         let transition = Transition::between(self.last, config.mode);
-        let mut concealed = [[0.0_f32; MAX_5MS_SAMPLES_48K]; 2];
-        if transition == Transition::IntoCelt {
-            self.conceal_transition_tail(samples, &mut concealed)?;
-        }
+        let mut concealed = match transition {
+            Transition::IntoCelt => Some(self.conceal_transition_tail(samples)?),
+            Transition::None | Transition::OutOfCelt => None,
+        };
 
         let mut range_decoder = entropy::Decoder::new(bytes);
         self.decode_silk_layer(&mut range_decoder, config, out.reborrow())?;
         let payload = FramePayload::split(config.mode, &mut range_decoder, bytes)?;
         let transition = transition.unless_redundant(&payload.redundancy);
-        if transition == Transition::OutOfCelt {
-            self.conceal_transition_tail(samples, &mut concealed)?;
+        match transition {
+            Transition::None => concealed = None,
+            Transition::OutOfCelt => concealed = Some(self.conceal_transition_tail(samples)?),
+            Transition::IntoCelt => {}
         }
 
-        let mut redundant = [[0.0_f32; MAX_5MS_SAMPLES_48K]; 2];
-        let ranges = self.decode_celt_layers(
-            &mut range_decoder,
-            &payload,
-            config,
-            &mut redundant,
-            out.reborrow(),
-        )?;
-        self.crossfade_leading_redundancy(&payload.redundancy, &redundant, out.reborrow(), samples);
-        if transition != Transition::None {
-            self.crossfade_prefix(&concealed, out, samples);
+        let ranges =
+            self.decode_celt_layers(&mut range_decoder, &payload, config, out.reborrow(), samples)?;
+        if let Some(concealed) = &concealed {
+            self.crossfade_prefix(concealed, out, samples);
         }
 
         // RFC 6716 Section 6: the final range state is part of conformance. A frame left
@@ -675,21 +669,20 @@ impl StreamDecoder {
     /// Decodes the CELT side of the frame in bitstream order: a leading redundant frame
     /// ([`Redundancy::CeltToSilk`]), the frame's own CELT layer or overlap flush, then a
     /// trailing redundant frame ([`Redundancy::SilkToCelt`]) cross-lapped with the frame's end
-    /// ([RFC 6716 Section 4.5.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.1.4>)).
-    /// Returns the range coder states of the layer and of the redundant frame (`0` without one).
+    /// ([RFC 6716 Section 4.5.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.1.4>)),
+    /// or cross-laps the leading redundant frame with the start of `out`. Returns the range coder
+    /// states of the layer and of the redundant frame (`0` without one).
     fn decode_celt_layers(
         &mut self,
         range_decoder: &mut entropy::Decoder<'_>,
         payload: &FramePayload<'_>,
         config: FrameConfig,
-        redundant: &mut [[f32; MAX_5MS_SAMPLES_48K]; 2],
         mut out: Planes<'_>,
+        samples: usize,
     ) -> Result<CeltRanges> {
-        let leading_range = match payload.redundancy {
-            Redundancy::CeltToSilk(frame) => {
-                self.decode_redundant_frame(frame, config, redundant)?
-            }
-            Redundancy::None | Redundancy::SilkToCelt(_) => 0,
+        let leading = match payload.redundancy {
+            Redundancy::CeltToSilk(frame) => Some(self.decode_redundant_frame(frame, config)?),
+            Redundancy::None | Redundancy::SilkToCelt(_) => None,
         };
 
         let layer_range = match config.mode {
@@ -707,25 +700,29 @@ impl StreamDecoder {
             )?,
         };
 
-        let redundant_range = match payload.redundancy {
-            Redundancy::SilkToCelt(frame) => {
-                self.decode_trailing_redundancy(frame, config, redundant, out)?
+        let redundant_range = match (leading, payload.redundancy) {
+            (Some((redundant, range)), _) => {
+                self.crossfade_leading_redundancy(&redundant, out, samples);
+                range
             }
-            Redundancy::None | Redundancy::CeltToSilk(_) => leading_range,
+            (None, Redundancy::SilkToCelt(frame)) => {
+                self.decode_trailing_redundancy(frame, config, out)?
+            }
+            (None, Redundancy::None | Redundancy::CeltToSilk(_)) => 0,
         };
         return Ok(CeltRanges { layer: layer_range, redundant: redundant_range });
     }
 
-    /// Decodes the 5 ms redundant CELT frame `frame` into the `redundant` rows as a CELT-only
-    /// frame without a TOC byte, with the channel count and bandwidth of the current frame
+    /// Decodes the 5 ms redundant CELT frame `frame` as a CELT-only frame without a TOC byte,
+    /// with the channel count and bandwidth of the current frame
     /// ([RFC 6716 Section 4.5.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.1.4>)).
-    /// Returns its range coder state.
+    /// Returns its synthesized samples and final range coder state.
     fn decode_redundant_frame(
         &mut self,
         frame: &[u8],
         config: FrameConfig,
-        redundant: &mut [[f32; MAX_5MS_SAMPLES_48K]; 2],
-    ) -> Result<u32> {
+    ) -> Result<([[f32; MAX_5MS_SAMPLES_48K]; 2], u32)> {
+        let mut redundant = [[0.0_f32; MAX_5MS_SAMPLES_48K]; 2];
         let f5 = self.sample_rate.samples_per(FrameDuration::Ms5);
         let layout = FrameLayout {
             block: BlockSize::from_frame_size_48k(MAX_5MS_SAMPLES_48K)?,
@@ -733,14 +730,14 @@ impl StreamDecoder {
             bandwidth: config.bandwidth,
             stream_channels: Layout::from_stereo_flag(config.stereo).channels(),
         };
-        let mut out = Planes::from_rows(redundant, self.is_stereo());
+        let mut out = Planes::from_rows(&mut redundant, self.is_stereo());
         self.celt_decoder.decode_frame(
             FrameInput::new(Some(frame), None),
             layout,
             out.range(..f5),
             Mix::Overwrite,
         )?;
-        return Ok(self.celt_decoder.final_range());
+        return Ok((redundant, self.celt_decoder.final_range()));
     }
 
     /// Decodes the CELT layer of a CELT-only frame, or of a Hybrid frame summed onto the SILK
@@ -817,11 +814,10 @@ impl StreamDecoder {
         &mut self,
         frame: &[u8],
         config: FrameConfig,
-        redundant: &mut [[f32; MAX_5MS_SAMPLES_48K]; 2],
         mut out: Planes<'_>,
     ) -> Result<u32> {
         self.celt_decoder.reset();
-        let range = self.decode_redundant_frame(frame, config, redundant)?;
+        let (redundant, range) = self.decode_redundant_frame(frame, config)?;
 
         let f2_5 = self.sample_rate.samples_per(FrameDuration::Ms2_5);
         let f5 = self.sample_rate.samples_per(FrameDuration::Ms5);
@@ -842,15 +838,10 @@ impl StreamDecoder {
     /// when it follows a CELT-only frame or the trailing redundancy of the previous frame.
     fn crossfade_leading_redundancy(
         &self,
-        redundancy: &Redundancy<'_>,
         redundant: &[[f32; MAX_5MS_SAMPLES_48K]; 2],
         out: Planes<'_>,
         samples: usize,
     ) {
-        let Redundancy::CeltToSilk(_) = redundancy
-        else {
-            return;
-        };
         let bridges_celt = self
             .last
             .is_none_or(|last| last.config.mode != AudioMode::Silk || last.silk_to_celt_redundancy);
@@ -893,6 +884,77 @@ impl StreamDecoder {
             FadeDirection::In,
             downsample,
         );
+        return;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_vectors::{
+        CELT_MONO_FB_20MS, CELT_STEREO_FB_20MS, HYBRID_MONO_FB_20MS, HYBRID_STEREO_FB_20MS,
+        MODE_TRANSITIONS, MONO_WB, STEREO_MB,
+    };
+
+    #[test]
+    fn decode_and_conceal_overwrite_uninitialized_planes_across_all_modes() {
+        let mut out = [[f32::NAN; MAX_PACKET_SAMPLES_48K]; 2];
+        let packets = [
+            MONO_WB.packets[0].packet,
+            STEREO_MB.packets[0].packet,
+            HYBRID_MONO_FB_20MS.packets[0].packet,
+            HYBRID_STEREO_FB_20MS.packets[0].packet,
+            CELT_MONO_FB_20MS.packets[0].packet,
+            CELT_STEREO_FB_20MS.packets[0].packet,
+        ];
+
+        for layout in [Layout::Mono, Layout::Stereo] {
+            let mut stream = StreamDecoder::new(SampleRate::Hz48000, layout).unwrap();
+            let stereo = layout.is_stereo();
+
+            out.iter_mut().for_each(|row| row.fill(f32::NAN));
+            let concealed = stream
+                .conceal_lost_packet(FrameDuration::Ms20, Planes::from_rows(&mut out, stereo))
+                .unwrap();
+            assert_eq!(concealed, 960);
+            assert!(out[0][..concealed].iter().all(|&s| s == 0.0));
+            if stereo {
+                assert!(out[1][..concealed].iter().all(|&s| s == 0.0));
+            }
+
+            for raw in packets {
+                let parsed = FramePacket::new(raw).unwrap();
+                out.iter_mut().for_each(|row| row.fill(f32::NAN));
+                let written =
+                    stream.decode_packet(&parsed, Planes::from_rows(&mut out, stereo)).unwrap();
+                assert_eq!(written, 960);
+                assert!(out[0][..written].iter().all(|s| s.is_finite()));
+                if stereo {
+                    assert!(out[1][..written].iter().all(|s| s.is_finite()));
+                }
+
+                out.iter_mut().for_each(|row| row.fill(f32::NAN));
+                let lost = stream
+                    .conceal_lost_packet(FrameDuration::Ms20, Planes::from_rows(&mut out, stereo))
+                    .unwrap();
+                assert_eq!(lost, 960);
+                assert!(out[0][..lost].iter().all(|s| s.is_finite()));
+                if stereo {
+                    assert!(out[1][..lost].iter().all(|s| s.is_finite()));
+                }
+            }
+        }
+
+        let mut transition_stream = StreamDecoder::new(SampleRate::Hz48000, Layout::Mono).unwrap();
+        for recorded in &MODE_TRANSITIONS.packets {
+            let parsed = FramePacket::new(recorded.packet).unwrap();
+            out.iter_mut().for_each(|row| row.fill(f32::NAN));
+            let written = transition_stream
+                .decode_packet(&parsed, Planes::from_rows(&mut out, false))
+                .unwrap();
+            assert_eq!(written, MODE_TRANSITIONS.samples);
+            assert!(out[0][..written].iter().all(|s| s.is_finite()));
+        }
         return;
     }
 }

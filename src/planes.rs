@@ -36,10 +36,15 @@ impl<'a> Planes<'a> {
     }
 
     /// Wraps a single mono plane.
-    #[cfg(test)]
     #[inline]
     pub(crate) fn mono(left: &'a mut [f32]) -> Self {
         return Self::new(left, None);
+    }
+
+    /// Wraps a coupled stereo pair of planes.
+    #[inline]
+    pub(crate) fn stereo(left: &'a mut [f32], right: &'a mut [f32]) -> Self {
+        return Self::new(left, Some(right));
     }
 
     /// Views a two-row scratch array as planes, exposing the second row only when `stereo`.

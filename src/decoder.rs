@@ -202,7 +202,10 @@ pub struct OpusDecoder {
     sample_rate: SampleRate,
     buffer: AudioBuffer<f32>,
     streams: Vec<StreamDecoder>,
-    scratch: [[f32; MAX_PACKET_SAMPLES_48K]; 2],
+    /// Staging buffer allocated once in [`Self::try_new`] only when an `OpusHead` mapping table
+    /// leaves a decoded stream channel unreferenced in `channel_mapping`. `None` for all RTP and
+    /// fully mapped Vorbis layouts, which decode directly into `buffer`.
+    scratch: Option<Box<[[f32; MAX_PACKET_SAMPLES_48K]; 2]>>,
     coupled_count: usize,
     channel_mapping: Vec<u8>,
     pre_skip: u16,
@@ -258,6 +261,12 @@ impl OpusDecoder {
             spec,
             MAX_PACKET_SAMPLES_48K / format.sample_rate.downsample_from_48k(),
         );
+        let scratch = OutputRouting::needs_scratch(
+            &layout.channel_mapping,
+            layout.streams.len(),
+            layout.coupled_count,
+        )
+        .then(|| Box::new([[0.0_f32; MAX_PACKET_SAMPLES_48K]; 2]));
 
         // Report the effective output format through `codec_params`.
         let mut params = params.to_owned();
@@ -268,7 +277,7 @@ impl OpusDecoder {
             sample_rate: format.sample_rate,
             buffer,
             streams: layout.streams,
-            scratch: [[0.0; MAX_PACKET_SAMPLES_48K]; 2],
+            scratch,
             coupled_count: layout.coupled_count,
             channel_mapping: layout.channel_mapping,
             pre_skip,
@@ -356,6 +365,40 @@ impl OpusDecoder {
             .unwrap_or(FrameDuration::Ms20);
         let total_samples = self.sample_rate.samples_per(duration);
         log::debug!("opus: concealing a lost packet of {total_samples} samples per channel");
+        self.conceal_streams(duration, total_samples).inspect_err(|_| self.buffer.clear())?;
+        return Ok(self.buffer.as_generic_audio_buffer_ref());
+    }
+
+    /// Conceals `duration` across every elementary stream into `self.buffer`.
+    fn conceal_streams(&mut self, duration: FrameDuration, total_samples: usize) -> Result<()> {
+        self.prepare_output_buffer(total_samples)?;
+        let routing = OutputRouting {
+            channel_mapping: &self.channel_mapping,
+            coupled_count: self.coupled_count,
+            gain: self.output_gain.scale(),
+        };
+        for (stream_pos, stream) in self.streams.iter_mut().enumerate() {
+            routing.decode_stream(
+                stream_pos,
+                total_samples,
+                self.scratch.as_deref_mut(),
+                &mut self.buffer,
+                |out| stream.conceal_lost_packet(duration, out),
+            )?;
+        }
+        return Ok(());
+    }
+
+    /// Splits `packet_data` into elementary stream packets and decodes each into `self.buffer`.
+    fn decode_streams(&mut self, packet_data: &[u8]) -> Result<()> {
+        let mut packets = StreamPackets::new(packet_data, self.streams.len());
+        let first = packets
+            .next()
+            .ok_or(SymphoniaError::DecodeError("opus: decoder has no elementary streams"))??;
+        // RFC 7845 Section 3: every stream packet of a multi-stream packet has the duration of
+        // the first one; any other is treated as a malformed TOC sequence.
+        let shape = (first.frames.len(), first.frame_duration);
+        let total_samples = shape.0 * self.sample_rate.samples_per(shape.1);
         self.prepare_output_buffer(total_samples)?;
 
         let routing = OutputRouting {
@@ -363,12 +406,25 @@ impl OpusDecoder {
             coupled_count: self.coupled_count,
             gain: self.output_gain.scale(),
         };
-        for (i, stream) in self.streams.iter_mut().enumerate() {
-            stream.conceal_lost_packet(duration, &mut self.scratch)?;
-            routing.route(i, total_samples, &self.scratch, &mut self.buffer)?;
+        let all_packets = std::iter::once(Ok(first)).chain(packets);
+        for (stream_pos, (stream, stream_packet)) in
+            self.streams.iter_mut().zip(all_packets).enumerate()
+        {
+            let stream_packet = stream_packet?;
+            if (stream_packet.frames.len(), stream_packet.frame_duration) != shape {
+                return Err(SymphoniaError::DecodeError(
+                    "opus: inconsistent frame count or frame duration across elementary streams",
+                ));
+            }
+            routing.decode_stream(
+                stream_pos,
+                total_samples,
+                self.scratch.as_deref_mut(),
+                &mut self.buffer,
+                |out| stream.decode_packet(&stream_packet, out),
+            )?;
         }
-
-        return Ok(self.buffer.as_generic_audio_buffer_ref());
+        return Ok(());
     }
 
     /// Clears the output buffer, renders `total_samples` frames and silences the output
@@ -397,7 +453,6 @@ impl OpusDecoder {
 impl AudioDecoder for OpusDecoder {
     fn reset(&mut self) {
         self.streams.iter_mut().for_each(StreamDecoder::reset);
-        self.scratch.iter_mut().for_each(|row| row.fill(0.0));
         self.buffer.clear();
         return;
     }
@@ -415,35 +470,7 @@ impl AudioDecoder for OpusDecoder {
             return self.decode_lost_packet();
         }
         self.buffer.clear();
-
-        let mut packets = StreamPackets::new(packet.data, self.streams.len());
-        let first = packets
-            .next()
-            .ok_or(SymphoniaError::DecodeError("opus: decoder has no elementary streams"))??;
-        // RFC 7845 Section 3: every stream packet of a multi-stream packet has the duration of
-        // the first one; any other is treated as a malformed TOC sequence.
-        let shape = (first.frames.len(), first.frame_duration);
-        let total_samples = shape.0 * self.sample_rate.samples_per(shape.1);
-        self.prepare_output_buffer(total_samples)?;
-
-        let routing = OutputRouting {
-            channel_mapping: &self.channel_mapping,
-            coupled_count: self.coupled_count,
-            gain: self.output_gain.scale(),
-        };
-        let packets = std::iter::once(Ok(first)).chain(packets);
-        for (i, (stream, stream_packet)) in self.streams.iter_mut().zip(packets).enumerate() {
-            let stream_packet = stream_packet?;
-            if (stream_packet.frames.len(), stream_packet.frame_duration) != shape {
-                self.buffer.clear();
-                return Err(SymphoniaError::DecodeError(
-                    "opus: inconsistent frame count or frame duration across elementary streams",
-                ));
-            }
-            stream.decode_packet(&stream_packet, &mut self.scratch)?;
-            routing.route(i, total_samples, &self.scratch, &mut self.buffer)?;
-        }
-
+        self.decode_streams(packet.data).inspect_err(|_| self.buffer.clear())?;
         return Ok(self.buffer.as_generic_audio_buffer_ref());
     }
 
@@ -868,6 +895,63 @@ mod tests {
         assert_eq!(one_byte.buffer.frames(), 480);
         assert_eq!(one_byte.final_range(), 0);
         assert_eq!(one_byte.buffer.plane(0).unwrap(), &concealed[..]);
+        return;
+    }
+
+    #[test]
+    fn zero_copy_layouts_omit_scratch_and_keep_decoder_compact() {
+        assert!(std::mem::size_of::<OpusDecoder>() < 1024);
+
+        let mono = decoder(&mono_params());
+        assert!(mono.scratch.is_none());
+
+        let stereo = decoder(&stereo_params());
+        assert!(stereo.scratch.is_none());
+
+        let surround = decoder(&head_params(three_channel_head()));
+        assert!(surround.scratch.is_none());
+
+        let unmapped = OpusHeadBuilder::new().channels(3).family(1).table(2, 1, &[0, 255, 1]);
+        let unmapped_dec = decoder(&head_params(unmapped));
+        assert!(unmapped_dec.scratch.is_some());
+        return;
+    }
+
+    #[test]
+    fn direct_zero_copy_applies_output_gain_and_clears_buffer_on_error() {
+        let scale = 10.0_f32.powf(512.0 / (20.0 * 256.0));
+        let mut unity = decoder(&stereo_params());
+        let mut gained_params = stereo_params();
+        gained_params
+            .with_extra_data(OpusHeadBuilder::new().output_gain(512).build().into_boxed_slice());
+        let mut gained = decoder(&gained_params);
+
+        let raw = CELT_STEREO_FB_20MS.packets[0].packet;
+        decode(&mut unity, raw, 960);
+        decode(&mut gained, raw, 960);
+        for ch in 0..2 {
+            let u = unity.buffer.plane(ch).unwrap();
+            let g = gained.buffer.plane(ch).unwrap();
+            for (u_s, g_s) in u.iter().zip(g) {
+                assert!((*g_s - *u_s * scale).abs() <= 1e-6);
+            }
+        }
+
+        unity.decode_lost_packet().unwrap();
+        gained.decode_lost_packet().unwrap();
+        for ch in 0..2 {
+            let u = unity.buffer.plane(ch).unwrap();
+            let g = gained.buffer.plane(ch).unwrap();
+            for (u_s, g_s) in u.iter().zip(g) {
+                assert!((*g_s - *u_s * scale).abs() <= 1e-6);
+            }
+        }
+
+        // Code 1 packet with odd payload length fails framing; buffer must be cleared.
+        let malformed =
+            PacketRef::new(0, Timestamp::from(0u32), Duration::from(960u64), &[0xFD, 1, 2, 3]);
+        assert!(gained.decode_ref(&malformed).is_err());
+        assert_eq!(gained.last_decoded().frames(), 0);
         return;
     }
 }
