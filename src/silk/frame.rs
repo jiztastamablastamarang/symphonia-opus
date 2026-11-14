@@ -257,10 +257,28 @@ impl Frame {
         };
     }
 
-    /// Empty frame with the geometry of `layout`
-    /// ([RFC 6716 Section 4.2.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.2>)).
-    pub(crate) fn for_layout(layout: &SilkLayout) -> Self {
-        return Self::new(layout.frame_samples(), layout.subframes, layout.lpc_order);
+    /// Resets the frame metadata and active subframes to the geometry of `layout` without
+    /// re-zeroing the large excitation and pulse scratch arrays that decoding overwrites.
+    pub(crate) fn reset_for_layout(&mut self, layout: &SilkLayout) {
+        let sample_count = layout.frame_samples().min(MAX_FRAME_SAMPLES);
+        let num_subframes = layout.subframes.min(MAX_SUBFRAMES);
+        let lpc_order = layout.lpc_order.min(MAX_LPC_ORDER);
+        self.frame_type = FrameType::default();
+        self.vad_flag = false;
+        self.lbrr_flag = false;
+        self.sample_count = sample_count;
+        self.num_subframes = num_subframes;
+        self.lpc_order = lpc_order;
+        for subframe in self.subframes[..num_subframes].iter_mut() {
+            *subframe = Subframe::default();
+        }
+        self.ltp_scale_q14 = 0;
+        self.lsf_interpolation_index = None;
+        self.stereo_weights = None;
+        self.mid_only = false;
+        self.lcg_seed = 0;
+        self.rate_level = 0;
+        self.output_pcm[sample_count..].fill(0);
     }
 
     /// Returns the number of 16-sample shell blocks in this frame (`ceil(sample_count / 16)`).

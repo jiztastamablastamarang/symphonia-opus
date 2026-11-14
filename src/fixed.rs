@@ -105,15 +105,42 @@ pub(crate) const fn saturate_i16(a: i32) -> i16 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) fn shl_saturating(a: i32, shift: u32) -> i32 {
+pub(crate) const fn shl_saturating(a: i32, shift: u32) -> i32 {
     if shift >= 31 {
-        return match a.cmp(&0) {
-            std::cmp::Ordering::Greater => i32::MAX,
-            std::cmp::Ordering::Less => i32::MIN,
-            std::cmp::Ordering::Equal => 0,
-        };
+        if a > 0 {
+            return i32::MAX;
+        }
+        if a < 0 {
+            return i32::MIN;
+        }
+        return 0;
     }
-    return ((a as i64) << shift).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let shifted = (a as i64) << shift;
+    if shifted > i32::MAX as i64 {
+        return i32::MAX;
+    }
+    if shifted < i32::MIN as i64 {
+        return i32::MIN;
+    }
+    return shifted as i32;
+}
+
+/// Compile-time constant left shift (`SHIFT < 31`) that saturates at the 32-bit signed bounds
+/// directly in 32-bit registers without widening to 64 bits.
+#[inline(always)]
+pub(crate) const fn shl_saturating_const<const SHIFT: u32>(a: i32) -> i32 {
+    const {
+        assert!(SHIFT < 31);
+    }
+    let max_in = i32::MAX >> SHIFT;
+    let min_in = i32::MIN >> SHIFT;
+    if a > max_in {
+        return i32::MAX;
+    }
+    if a < min_in {
+        return i32::MIN;
+    }
+    return a.wrapping_shl(SHIFT);
 }
 
 /// Approximates `(1 << q_res) / b` with one Newton refinement step, exactly as the normative

@@ -93,12 +93,13 @@ pub(crate) fn decode_excitation(
     }
 
     let blocks = &mut pulses[..num_blocks * SHELL_BLOCK_SAMPLES];
-    blocks.fill(0);
-    for (block, &pulse_count) in blocks
-        .chunks_exact_mut(SHELL_BLOCK_SAMPLES)
-        .zip(pulse_counts.iter())
-        .filter(|&(_, &pulse_count)| pulse_count > 0)
+    for (block, &pulse_count) in
+        blocks.chunks_exact_mut(SHELL_BLOCK_SAMPLES).zip(pulse_counts.iter())
     {
+        if pulse_count == 0 {
+            block.fill(0);
+            continue;
+        }
         decode_shell_partition(decoder, block, pulse_count)?;
     }
     for (block, &lsb_count) in blocks
@@ -116,7 +117,7 @@ pub(crate) fn decode_excitation(
     {
         decode_block_signs(decoder, block, frame_type, pulse_count)?;
     }
-    pulses[sample_count..].fill(0);
+    pulses[sample_count..num_blocks * SHELL_BLOCK_SAMPLES].fill(0);
 
     construct_excitation_q14(frame);
     return Ok(());
@@ -154,49 +155,42 @@ fn decode_block_pulse_count(
     return Ok((count as u8, lsb_count));
 }
 
-/// Whether every row of `rows` has `symbols` symbols.
-const fn every_row_has(rows: &[Cdf<'static>], symbols: usize) -> bool {
-    // A `const fn` cannot use iterators, so the rows are walked with an index.
-    let mut r = 0;
-    while r < rows.len() {
-        if rows[r].symbols() != symbols {
-            return false;
-        }
-        r += 1;
-    }
-    return true;
-}
-
-/// Whether row `r` of a shell split table offers the `r + 2` splits `0..=r + 1` of `r + 1` pulses,
-/// so that the pulses left for the right half are never negative
-/// ([RFC 6716 Section 4.2.7.8.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.8.3>)).
-const fn split_rows_are_complete(rows: &[Cdf<'static>]) -> bool {
-    // A `const fn` cannot use iterators, so the rows are walked with an index.
-    let mut r = 0;
-    while r < rows.len() {
-        if rows[r].symbols() != r + 2 {
-            return false;
-        }
-        r += 1;
-    }
-    return true;
-}
-
 // A block carries at most 16 pulses after the escapes, every split table has a row for each
 // count, and every row offers all splits: the shell decoding cannot index out of range or
 // underflow, which is proven when the crate compiles.
-const _: () = assert!(every_row_has(&constant::CDF_PULSE_COUNT, ESCAPE_PULSE_COUNT as usize + 1));
-const _: () =
+const _: () = {
+    const fn every_row_has(rows: &[Cdf<'static>], symbols: usize) -> bool {
+        let mut r = 0;
+        while r < rows.len() {
+            if rows[r].symbols() != symbols {
+                return false;
+            }
+            r += 1;
+        }
+        return true;
+    }
+
+    const fn split_rows_are_complete(rows: &[Cdf<'static>]) -> bool {
+        let mut r = 0;
+        while r < rows.len() {
+            if rows[r].symbols() != r + 2 {
+                return false;
+            }
+            r += 1;
+        }
+        return true;
+    }
+
+    assert!(every_row_has(&constant::CDF_PULSE_COUNT, ESCAPE_PULSE_COUNT as usize + 1));
     assert!(split_rows_are_complete(&constant::CDF_PULSE_COUNT_SPLIT_16_SAMPLE_PARTITIONS));
-const _: () =
     assert!(split_rows_are_complete(&constant::CDF_PULSE_COUNT_SPLIT_8_SAMPLE_PARTITIONS));
-const _: () =
     assert!(split_rows_are_complete(&constant::CDF_PULSE_COUNT_SPLIT_4_SAMPLE_PARTITIONS));
-const _: () =
     assert!(split_rows_are_complete(&constant::CDF_PULSE_COUNT_SPLIT_2_SAMPLE_PARTITIONS));
-const _: () = assert!(
-    constant::CDF_PULSE_COUNT_SPLIT_16_SAMPLE_PARTITIONS.len() == ESCAPE_PULSE_COUNT as usize - 1
-);
+    assert!(
+        constant::CDF_PULSE_COUNT_SPLIT_16_SAMPLE_PARTITIONS.len()
+            == ESCAPE_PULSE_COUNT as usize - 1
+    );
+};
 
 /// Recursively splits `total_pulses` across `partition` in depth-first order
 /// (`16 -> 8 -> 4 -> 2 -> 1`,
@@ -217,19 +211,13 @@ fn decode_shell_partition(
         return Ok(());
     }
 
-    static SHELL_SPLIT_CDFS: [&[Cdf<'static>; 16]; 4] = [
-        &constant::CDF_PULSE_COUNT_SPLIT_2_SAMPLE_PARTITIONS,
-        &constant::CDF_PULSE_COUNT_SPLIT_4_SAMPLE_PARTITIONS,
-        &constant::CDF_PULSE_COUNT_SPLIT_8_SAMPLE_PARTITIONS,
-        &constant::CDF_PULSE_COUNT_SPLIT_16_SAMPLE_PARTITIONS,
-    ];
-
-    let table = len
-        .is_power_of_two()
-        .then(|| (len.trailing_zeros() as usize).checked_sub(1))
-        .flatten()
-        .and_then(|level| SHELL_SPLIT_CDFS.get(level))
-        .ok_or(Error::InvalidPartitionSize)?;
+    let table = match len {
+        16 => &constant::CDF_PULSE_COUNT_SPLIT_16_SAMPLE_PARTITIONS,
+        8 => &constant::CDF_PULSE_COUNT_SPLIT_8_SAMPLE_PARTITIONS,
+        4 => &constant::CDF_PULSE_COUNT_SPLIT_4_SAMPLE_PARTITIONS,
+        2 => &constant::CDF_PULSE_COUNT_SPLIT_2_SAMPLE_PARTITIONS,
+        _ => return Err(Error::InvalidPartitionSize.into()),
+    };
     let cdf = table[usize::from(total_pulses) - 1];
 
     let left_pulses = decoder.decode_symbol(cdf)? as u8;
@@ -282,20 +270,21 @@ fn decode_block_signs(
 /// ([RFC 6716 Section 4.2.7.8.6](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.8.6>)).
 fn construct_excitation_q14(frame: &mut Frame) {
     let offset_q14 = quantization_offset_q8(frame.frame_type) << OFFSET_Q8_TO_Q14_SHIFT;
+    let neg_offset_q14 = -offset_q14;
     let sample_count = frame.sample_count;
     let mut seed = frame.lcg_seed as i32;
 
     let Frame { pulses, exc_q14, .. } = frame;
     for (&pulse, exc) in pulses[..sample_count].iter().zip(exc_q14[..sample_count].iter_mut()) {
         seed = advance_lcg_seed(seed);
+        if pulse == 0 {
+            *exc = if seed < 0 { neg_offset_q14 } else { offset_q14 };
+            continue;
+        }
 
         let pulse = pulse as i32;
-        let pulse_q14 = pulse << PULSE_TO_Q14_SHIFT;
-        let magnitude_q14 = match pulse_q14.cmp(&0) {
-            std::cmp::Ordering::Greater => pulse_q14 - QUANT_LEVEL_ADJUST_Q14,
-            std::cmp::Ordering::Less => pulse_q14 + QUANT_LEVEL_ADJUST_Q14,
-            std::cmp::Ordering::Equal => 0,
-        } + offset_q14;
+        let adjust_q14 = if pulse > 0 { -QUANT_LEVEL_ADJUST_Q14 } else { QUANT_LEVEL_ADJUST_Q14 };
+        let magnitude_q14 = (pulse << PULSE_TO_Q14_SHIFT) + adjust_q14 + offset_q14;
 
         *exc = if seed < 0 { -magnitude_q14 } else { magnitude_q14 };
         seed = seed.wrapping_add(pulse);

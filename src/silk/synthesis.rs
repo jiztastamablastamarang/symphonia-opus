@@ -74,6 +74,28 @@ const MID_TO_Q11_SHIFT: u32 = 11;
 /// Right shift turning the Q8 side prediction back into PCM (RFC 6716 Section 4.2.8).
 const SIDE_Q8_TO_PCM_SHIFT: u32 = 8;
 
+/// Fixed-order (`10` or `16`) LPC analysis (whitening) filter kernel.
+#[inline]
+fn lpc_analysis_order<const ORDER: usize>(
+    out: &mut [i16],
+    input: &[i16],
+    a_q12: &[i16; ORDER],
+    len: usize,
+) {
+    let a_rev: [i16; ORDER] = std::array::from_fn(|k| a_q12[ORDER - 1 - k]);
+    out[..ORDER].fill(0);
+    for (k, out_sample) in out[ORDER..len].iter_mut().enumerate() {
+        let window = &input[k..k + ORDER + 1];
+        let prediction_q12 = window[..ORDER]
+            .iter()
+            .zip(a_rev.iter())
+            .fold(0i32, |acc, (&sample, &tap)| acc.wrapping_add((sample as i32) * (tap as i32)));
+        let residual_q12 =
+            ((window[ORDER] as i32) << LPC_ANALYSIS_Q12_SHIFT).wrapping_sub(prediction_q12);
+        *out_sample = saturate_i16(round_shift(residual_q12, LPC_ANALYSIS_Q12_SHIFT));
+    }
+}
+
 /// Runs the LPC analysis (whitening) filter with Q12 coefficients `a_q12` over `input`
 /// ([RFC 6716 Section 4.2.7.9.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.1>)).
 ///
@@ -83,6 +105,14 @@ pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], a_q12: &[i16])
     let len = out.len().min(input.len());
     if len <= order || order == 0 {
         out[..len].fill(0);
+        return;
+    }
+    if let Ok(taps) = <&[i16; 10]>::try_from(a_q12) {
+        lpc_analysis_order::<10>(out, input, taps, len);
+        return;
+    }
+    if let Ok(taps) = <&[i16; 16]>::try_from(a_q12) {
+        lpc_analysis_order::<16>(out, input, taps, len);
         return;
     }
 

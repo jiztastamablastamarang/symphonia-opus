@@ -12,7 +12,7 @@ use symphonia_core::errors::Result;
 
 use crate::fixed::{
     mul_add_q16_i16, mul_high_i32, mul_q16, reciprocal_q, round_shift, round_shift_i64,
-    saturate_i16, shl_saturating,
+    saturate_i16, shl_saturating_const,
 };
 use crate::silk::MAX_LPC_ORDER;
 use crate::silk::constant;
@@ -81,6 +81,13 @@ pub(crate) fn lpc_predict_q10(history_q14: &[i32], a_q12: &[i16]) -> i32 {
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.1>
 #[inline]
 pub(crate) fn ltp_predict_q13(history_q15: &[i32], b_q14: &[i16]) -> i32 {
+    if let (Some(hist), Ok(taps)) = (history_q15.last_chunk::<5>(), <&[i16; 5]>::try_from(b_q14)) {
+        let acc = mul_add_q16_i16(LTP_PRED_ROUNDING_BIAS_Q13, hist[4], taps[0]);
+        let acc = mul_add_q16_i16(acc, hist[3], taps[1]);
+        let acc = mul_add_q16_i16(acc, hist[2], taps[2]);
+        let acc = mul_add_q16_i16(acc, hist[1], taps[3]);
+        return mul_add_q16_i16(acc, hist[0], taps[4]);
+    }
     let newest = history_q15.len() - 1;
     return b_q14.iter().enumerate().fold(LTP_PRED_ROUNDING_BIAS_Q13, |acc, (j, &b_tap)| {
         mul_add_q16_i16(acc, history_q15[newest - j], b_tap)
@@ -104,12 +111,54 @@ pub(crate) fn lpc_synthesize_sample_q14(
 ) -> i16 {
     let lpc_pred_q10 = lpc_predict_q10(&state_q14[..MAX_LPC_ORDER + i], a_q12);
     let lpc_out_q14 = state_q14[MAX_LPC_ORDER + i]
-        .saturating_add(shl_saturating(lpc_pred_q10, LPC_PRED_Q10_TO_Q14_SHIFT));
+        .saturating_add(shl_saturating_const::<LPC_PRED_Q10_TO_Q14_SHIFT>(lpc_pred_q10));
     state_q14[MAX_LPC_ORDER + i] = lpc_out_q14;
     return saturate_i16(round_shift(
         mul_q16(lpc_out_q14, gain_q10),
         LPC_OUT_Q14_GAIN_TO_PCM_SHIFT,
     ));
+}
+
+/// Fixed-order (`10` or `16`) all-pole LPC synthesis kernel.
+///
+/// Evaluates the `ORDER - 1` older taps in forward contiguous memory order before adding the
+/// newest feedback tap `s0 * a_q12[0]`, keeping the loop-carried recurrence chain short while
+/// remaining bit-identical (`wrapping_add` is associative and commutative modulo `2^32`).
+#[inline]
+fn lpc_synthesize_order<const ORDER: usize>(
+    state_q14: &mut [i32],
+    a_q12: &[i16; ORDER],
+    gain_q10: i32,
+    out_pcm: &mut [i16],
+) {
+    const {
+        assert!(ORDER >= 2 && ORDER <= MAX_LPC_ORDER);
+    }
+    let n = out_pcm.len();
+    let state = &mut state_q14[MAX_LPC_ORDER - ORDER..MAX_LPC_ORDER + n];
+    let a0 = a_q12[0];
+    let a_tail_rev: [i16; ORDER] = std::array::from_fn(|k| a_q12[ORDER - 1 - k]);
+    let tail_taps = &a_tail_rev[..ORDER - 1];
+    let bias = (ORDER >> 1) as i32;
+    let mut s0 = state[ORDER - 1];
+
+    for (i, out_sample) in out_pcm.iter_mut().enumerate() {
+        let window = &mut state[i..i + ORDER + 1];
+        let tail_sum = window[..ORDER - 1]
+            .iter()
+            .zip(tail_taps.iter())
+            .fold(bias, |acc, (&sample_q14, &tap_q12)| mul_add_q16_i16(acc, sample_q14, tap_q12));
+        let lpc_pred_q10 = mul_add_q16_i16(tail_sum, s0, a0);
+        let lpc_out_q14 = window[ORDER]
+            .saturating_add(shl_saturating_const::<LPC_PRED_Q10_TO_Q14_SHIFT>(lpc_pred_q10));
+        window[ORDER] = lpc_out_q14;
+        s0 = lpc_out_q14;
+        *out_sample = saturate_i16(round_shift(
+            mul_q16(lpc_out_q14, gain_q10),
+            LPC_OUT_Q14_GAIN_TO_PCM_SHIFT,
+        ));
+    }
+    return;
 }
 
 /// Runs the all-pole LPC synthesis filter in place over `state_q14`
@@ -127,6 +176,14 @@ pub(crate) fn lpc_synthesize_q14(
     gain_q10: i32,
     out_pcm: &mut [i16],
 ) {
+    if let Ok(taps) = <&[i16; 10]>::try_from(a_q12) {
+        lpc_synthesize_order::<10>(state_q14, taps, gain_q10, out_pcm);
+        return;
+    }
+    if let Ok(taps) = <&[i16; 16]>::try_from(a_q12) {
+        lpc_synthesize_order::<16>(state_q14, taps, gain_q10, out_pcm);
+        return;
+    }
     out_pcm.iter_mut().enumerate().for_each(|(i, out_sample)| {
         *out_sample = lpc_synthesize_sample_q14(state_q14, i, a_q12, gain_q10);
     });

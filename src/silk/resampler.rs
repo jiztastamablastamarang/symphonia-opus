@@ -79,8 +79,9 @@ impl DownFilter {
     }
 
     /// Q14 coefficients of the 2nd-order AR pre-filter.
-    fn ar2_coefs_q14(self) -> &'static [i16] {
-        return &self.coefs()[..AR2_COEFS];
+    fn ar2_coefs_q14(self) -> [i16; AR2_COEFS] {
+        let coefs = self.coefs();
+        return [coefs[0], coefs[1]];
     }
 
     /// Q16 FIR taps.
@@ -113,22 +114,21 @@ impl DownFilter {
         let fir = self.fir_coefs();
         return match self {
             Self::Interpolated { fractions, .. } => {
-                let half_order = RESAMPLER_DOWN_ORDER_FIR0 / 2;
+                const HALF_ORDER: usize = RESAMPLER_DOWN_ORDER_FIR0 / 2;
                 let phase = mul_q16_i16(frac_q16, fractions as i16) as usize;
-                let rising = &fir[half_order * phase..half_order * (phase + 1)];
-                let falling_start = half_order * (fractions - 1 - phase);
-                let falling = &fir[falling_start..falling_start + half_order];
+                let rising = &fir[HALF_ORDER * phase..HALF_ORDER * (phase + 1)];
+                let falling_start = HALF_ORDER * (fractions - 1 - phase);
+                let falling = &fir[falling_start..falling_start + HALF_ORDER];
 
-                window[..half_order]
+                let acc = window[..HALF_ORDER]
                     .iter()
                     .zip(rising.iter())
-                    .chain(
-                        window[half_order..RESAMPLER_DOWN_ORDER_FIR0]
-                            .iter()
-                            .rev()
-                            .zip(falling.iter()),
-                    )
-                    .fold(0i32, |acc, (&sample, &tap)| mul_add_q16_i16(acc, sample, tap))
+                    .fold(0i32, |acc, (&sample, &tap)| mul_add_q16_i16(acc, sample, tap));
+                window[HALF_ORDER..RESAMPLER_DOWN_ORDER_FIR0]
+                    .iter()
+                    .rev()
+                    .zip(falling.iter())
+                    .fold(acc, |acc, (&sample, &tap)| mul_add_q16_i16(acc, sample, tap))
             }
             Self::Symmetric { order, .. } => {
                 let half_order = order / 2;
@@ -325,13 +325,11 @@ impl ResamplerState {
         let processed = &input[..input.len() - usize::from(trailing_single)];
 
         let mut written = 0usize;
+        let ar2_coefs = filter.ar2_coefs_q14();
+        let [s0, s1, ..] = &mut self.iir_state;
+        let mut ar2_state = [*s0, *s1];
         for chunk in processed.chunks(self.batch_size) {
-            ar2(
-                &mut self.iir_state[..AR2_COEFS],
-                &mut buf[order..order + chunk.len()],
-                chunk,
-                filter.ar2_coefs_q14(),
-            );
+            ar2(&mut ar2_state, &mut buf[order..order + chunk.len()], chunk, ar2_coefs);
             written += filter.interpolate(
                 &buf[..order + chunk.len()],
                 self.inv_ratio_q16,
@@ -339,6 +337,7 @@ impl ResamplerState {
             );
             buf.copy_within(chunk.len()..chunk.len() + order, 0);
         }
+        [*s0, *s1] = ar2_state;
 
         self.fir_state_down[..order].copy_from_slice(&buf[..order]);
     }
@@ -436,9 +435,32 @@ fn inverse_ratio_q16(fs_in: i32, fs_out: i32, up2x: u32) -> i32 {
     return inv_ratio_q16;
 }
 
+/// Full 8-tap polyphase FIR table assembled at compile time by concatenating each 4-tap rising
+/// branch `RESAMPLER_FRAC_FIR_12[phase]` with the reversed complementary 4-tap falling branch
+/// `RESAMPLER_FRAC_FIR_12[11 - phase]`, turning [`interpolate_fir_12`] into a contiguous 8-tap
+/// SIMD dot product.
+const RESAMPLER_FRAC_FIR_12_TAPS: [[i16; RESAMPLER_ORDER_FIR_12]; UP_FIR_PHASES as usize] = {
+    const PHASES: usize = UP_FIR_PHASES as usize;
+    const HALF: usize = RESAMPLER_ORDER_FIR_12 / 2;
+    let mut table = [[0i16; RESAMPLER_ORDER_FIR_12]; PHASES];
+    let mut phase = 0;
+    while phase < PHASES {
+        let rising = RESAMPLER_FRAC_FIR_12[phase];
+        let falling = RESAMPLER_FRAC_FIR_12[PHASES - 1 - phase];
+        let mut j = 0;
+        while j < HALF {
+            table[phase][j] = rising[j];
+            table[phase][HALF + j] = falling[HALF - 1 - j];
+            j += 1;
+        }
+        phase += 1;
+    }
+    table
+};
+
 /// One first-order allpass section: `feedback` maps the difference between the input and the
 /// section state to the fed-back term (RFC 6716 Section 4.2.9).
-#[inline]
+#[inline(always)]
 fn allpass_section(state: &mut i32, input: i32, feedback: impl Fn(i32) -> i32) -> i32 {
     let difference = input.wrapping_sub(*state);
     let fed_back = feedback(difference);
@@ -449,8 +471,12 @@ fn allpass_section(state: &mut i32, input: i32, feedback: impl Fn(i32) -> i32) -
 
 /// Three allpass sections in series with Q16 coefficients `coefs_q16`; the last coefficient is
 /// stored minus one so its section adds the difference back (RFC 6716 Section 4.2.9).
-#[inline]
-fn allpass_cascade(state: &mut [i32], coefs_q16: &[i16; ALLPASS_SECTIONS], input: i32) -> i32 {
+#[inline(always)]
+fn allpass_cascade(
+    state: &mut [i32; ALLPASS_SECTIONS],
+    coefs_q16: &[i16; ALLPASS_SECTIONS],
+    input: i32,
+) -> i32 {
     let first = allpass_section(&mut state[0], input, |y| mul_q16_i16(y, coefs_q16[0]));
     let second = allpass_section(&mut state[1], first, |y| mul_q16_i16(y, coefs_q16[1]));
     return allpass_section(&mut state[2], second, |y| mul_add_q16_i16(y, y, coefs_q16[2]));
@@ -460,42 +486,47 @@ fn allpass_cascade(state: &mut [i32], coefs_q16: &[i16; ALLPASS_SECTIONS], input
 /// ones from the other, both fed with the same Q10 input
 /// ([RFC 6716 Section 4.2.9](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.9>)).
 fn up2_hq(iir_state: &mut [i32; 2 * ALLPASS_SECTIONS], out: &mut [i16], input: &[i16]) {
-    let (even_state, odd_state) = iir_state.split_at_mut(ALLPASS_SECTIONS);
+    let [e0, e1, e2, o0, o1, o2] = *iir_state;
+    let mut even_state = [e0, e1, e2];
+    let mut odd_state = [o0, o1, o2];
     for (out_pair, &sample) in out.chunks_exact_mut(2).zip(input.iter()) {
         let in_q10 = (sample as i32) << UP2_STATE_Q10_SHIFT;
-        let even_q10 = allpass_cascade(even_state, &RESAMPLER_UP2_HQ_0, in_q10);
-        let odd_q10 = allpass_cascade(odd_state, &RESAMPLER_UP2_HQ_1, in_q10);
+        let even_q10 = allpass_cascade(&mut even_state, &RESAMPLER_UP2_HQ_0, in_q10);
+        let odd_q10 = allpass_cascade(&mut odd_state, &RESAMPLER_UP2_HQ_1, in_q10);
         out_pair[0] = saturate_i16(round_shift(even_q10, UP2_STATE_Q10_SHIFT));
         out_pair[1] = saturate_i16(round_shift(odd_q10, UP2_STATE_Q10_SHIFT));
     }
+    *iir_state =
+        [even_state[0], even_state[1], even_state[2], odd_state[0], odd_state[1], odd_state[2]];
 }
 
 /// Interpolates the 2x upsampled signal `buf` (8 history samples followed by the batch) with
-/// the 12-phase 4+4 tap FIR at every Q16 position below the batch length, returning the number
+/// the 12-phase 8-tap FIR at every Q16 position below the batch length, returning the number
 /// of samples written (RFC 6716 Section 4.2.9).
 fn interpolate_fir_12(buf: &[i16], index_increment_q16: i32, out: &mut [i16]) -> usize {
     const ORDER: usize = RESAMPLER_ORDER_FIR_12;
-    const HALF_ORDER: usize = ORDER / 2;
     let max_index_q16 = ((buf.len() - ORDER) as i32) << 16;
-    let positions_q16 = (0i32..)
-        .map(|k| k * index_increment_q16)
-        .take_while(|&index_q16| index_q16 < max_index_q16);
-
+    let mut index_q16 = 0i32;
     let mut written = 0usize;
-    for (out_sample, index_q16) in out.iter_mut().zip(positions_q16) {
+
+    for out_sample in out.iter_mut() {
+        if index_q16 >= max_index_q16 {
+            break;
+        }
         let phase = mul_q16_i16(index_q16 & INDEX_FRAC_Q16_MASK, UP_FIR_PHASES) as usize;
         let offset = (index_q16 >> 16) as usize;
-        let window = &buf[offset..offset + ORDER];
-        let rising = &RESAMPLER_FRAC_FIR_12[phase];
-        let falling = &RESAMPLER_FRAC_FIR_12[(UP_FIR_PHASES as usize) - 1 - phase];
-
-        let res_q15 = window[..HALF_ORDER]
+        let Some(window) = buf[offset..].first_chunk::<ORDER>()
+        else {
+            break;
+        };
+        let taps = &RESAMPLER_FRAC_FIR_12_TAPS[phase];
+        let res_q15 = window
             .iter()
-            .zip(rising.iter())
-            .chain(window[HALF_ORDER..].iter().zip(falling.iter().rev()))
+            .zip(taps.iter())
             .fold(0i32, |acc, (&sample, &tap)| acc.wrapping_add((sample as i32) * (tap as i32)));
 
         *out_sample = saturate_i16(round_shift(res_q15, UP_FIR_Q15_SHIFT));
+        index_q16 += index_increment_q16;
         written += 1;
     }
     return written;
@@ -503,14 +534,17 @@ fn interpolate_fir_12(buf: &[i16], index_increment_q16: i32, out: &mut [i16]) ->
 
 /// 2nd-order AR filter of the downsampling stage producing Q8 output
 /// ([RFC 6716 Section 4.2.9](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.9>)).
-fn ar2(state: &mut [i32], out_q8: &mut [i32], input: &[i16], a_q14: &[i16]) {
+fn ar2(state: &mut [i32; AR2_COEFS], out_q8: &mut [i32], input: &[i16], a_q14: [i16; AR2_COEFS]) {
+    let [mut s0, mut s1] = *state;
+    let [a0, a1] = a_q14;
     for (out, &sample) in out_q8.iter_mut().zip(input.iter()) {
-        let out32 = state[0].wrapping_add((sample as i32) << AR2_OUTPUT_Q8_SHIFT);
+        let out32 = s0.wrapping_add((sample as i32) << AR2_OUTPUT_Q8_SHIFT);
         *out = out32;
         let fed_back = out32 << AR2_FEEDBACK_SHIFT;
-        state[0] = mul_add_q16_i16(state[1], fed_back, a_q14[0]);
-        state[1] = mul_q16_i16(fed_back, a_q14[1]);
+        s0 = mul_add_q16_i16(s1, fed_back, a0);
+        s1 = mul_q16_i16(fed_back, a1);
     }
+    *state = [s0, s1];
 }
 
 #[cfg(test)]

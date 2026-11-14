@@ -113,6 +113,7 @@ impl Decoder {
         mut out: Planes<'_>,
     ) -> Result<usize> {
         let stereo_to_mono = self.begin_frame(is_stereo, out.is_stereo());
+        let mut unmix_buf = [[0i16; UNMIX_BUFFER_SAMPLES]; 2];
 
         let mut total_written = 0usize;
         self.decode_opus_frame(range_decoder, is_stereo, |decoder, kind, i, pair| {
@@ -121,7 +122,8 @@ impl Decoder {
             }
             let stereo_to_mono = stereo_to_mono && i == 0;
             let out = out.range(total_written..);
-            total_written += decoder.output_frame_pair(pair, is_stereo, stereo_to_mono, out)?;
+            total_written +=
+                decoder.output_frame_pair(pair, is_stereo, stereo_to_mono, out, &mut unmix_buf)?;
             return Ok(());
         })?;
 
@@ -138,13 +140,16 @@ impl Decoder {
         mut out: Planes<'_>,
     ) -> Result<usize> {
         let stereo_to_mono = self.begin_frame(is_stereo, out.is_stereo());
+        let mut pair = SilkChannelFramePair::default();
+        let mut unmix_buf = [[0i16; UNMIX_BUFFER_SAMPLES]; 2];
 
         let mut total_written = 0usize;
         for i in 0..self.layout.frame_count {
-            let pair = self.conceal_frame_pair(is_stereo)?;
+            self.conceal_frame_pair(is_stereo, &mut pair)?;
             let stereo_to_mono = stereo_to_mono && i == 0;
             let out = out.range(total_written..);
-            total_written += self.output_frame_pair(&pair, is_stereo, stereo_to_mono, out)?;
+            total_written +=
+                self.output_frame_pair(&pair, is_stereo, stereo_to_mono, out, &mut unmix_buf)?;
         }
 
         return Ok(total_written);
@@ -177,28 +182,36 @@ impl Decoder {
             && !self.internal_rate_changed;
     }
 
-    /// Conceals one channel's lost SILK frame (non-normative,
+    /// Conceals one channel's lost SILK frame into `frame` (non-normative,
     /// [RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
-    fn conceal_channel_frame(&mut self, channel: usize) -> Result<Frame> {
+    fn conceal_channel_frame(&mut self, channel: usize, frame: &mut Frame) -> Result<()> {
         let layout = self.layout;
-        let mut frame = Frame::for_layout(&layout);
+        frame.reset_for_layout(&layout);
         let sample_count = frame.sample_count;
         self.channels[channel].conceal(&layout, &mut frame.output_pcm[..sample_count])?;
-        return Ok(frame);
+        return Ok(());
     }
 
-    /// Conceals a mid/side SILK frame pair for packet loss or DTX; a side channel that the
-    /// previous frame left uncoded stays silent and restarts its gain reference
+    /// Conceals a mid/side SILK frame pair for packet loss or DTX into `pair`; a side channel
+    /// that the previous frame left uncoded stays silent and restarts its gain reference
     /// ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
-    fn conceal_frame_pair(&mut self, is_stereo: bool) -> Result<SilkChannelFramePair> {
-        let mid = self.conceal_channel_frame(0)?;
+    fn conceal_frame_pair(
+        &mut self,
+        is_stereo: bool,
+        pair: &mut SilkChannelFramePair,
+    ) -> Result<()> {
+        pair.stereo_weights = None;
+        self.conceal_channel_frame(0, &mut pair.mid)?;
         if is_stereo && self.prev_decode_only_middle {
             self.channels[1].core.references.last_gain_index = LAST_GAIN_INDEX_AFTER_RESET;
         }
-        let side = (is_stereo && !self.prev_decode_only_middle)
-            .then(|| self.conceal_channel_frame(1))
-            .transpose()?;
-        return Ok(SilkChannelFramePair { stereo_weights: None, mid, side });
+        if is_stereo && !self.prev_decode_only_middle {
+            let side = pair.side.get_or_insert_with(Frame::default);
+            self.conceal_channel_frame(1, side)?;
+            return Ok(());
+        }
+        pair.side = None;
+        return Ok(());
     }
 
     /// Decodes a single Opus frame payload (10, 20, 40, or 60 ms) containing 1 to 3 SILK frames
@@ -208,7 +221,7 @@ impl Decoder {
     /// are parsed against fresh coding references so the range decoder advances past them; the
     /// regular frame pairs ([Section 4.2.6](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.6>))
     /// are synthesised. Every frame pair is handed to `sink` with its kind and frame index
-    /// as soon as it is decoded, so only one pair is held at a time.
+    /// as soon as it is decoded, reusing a single stack-allocated `SilkChannelFramePair`.
     fn decode_opus_frame<F>(
         &mut self,
         range_decoder: &mut entropy::Decoder<'_>,
@@ -219,13 +232,14 @@ impl Decoder {
         F: FnMut(&mut Self, FrameKind, usize, &SilkChannelFramePair) -> Result<()>,
     {
         let header = decode_silk_header(range_decoder, is_stereo, self.layout.frame_count)?;
+        let mut pair = SilkChannelFramePair::default();
 
         self.lbrr_references = [CodingReferences::new(); 2];
-        self.parse_lbrr_frames(range_decoder, &header, is_stereo, &mut sink)?;
+        self.parse_lbrr_frames(range_decoder, &header, is_stereo, &mut pair, &mut sink)?;
 
         for i in 0..header.num_silk_frames {
             let plan = FramePairPlan::regular(&header, is_stereo, i, self.prev_decode_only_middle);
-            let pair = self.decode_silk_frame_pair(range_decoder, plan)?;
+            self.decode_silk_frame_pair(range_decoder, plan, &mut pair)?;
             sink(self, plan.kind, i, &pair)?;
         }
 
@@ -239,6 +253,7 @@ impl Decoder {
         range_decoder: &mut entropy::Decoder<'_>,
         header: &SilkHeaderFlags,
         is_stereo: bool,
+        pair: &mut SilkChannelFramePair,
         sink: &mut F,
     ) -> Result<()>
     where
@@ -246,19 +261,20 @@ impl Decoder {
     {
         for i in (0..header.num_silk_frames).filter(|&i| header.has_frame_lbrr(i)) {
             let plan = FramePairPlan::lbrr(header, is_stereo, i);
-            let pair = self.decode_silk_frame_pair(range_decoder, plan)?;
-            sink(self, FrameKind::Lbrr, i, &pair)?;
+            self.decode_silk_frame_pair(range_decoder, plan, pair)?;
+            sink(self, FrameKind::Lbrr, i, pair)?;
         }
         return Ok(());
     }
 
-    /// Decodes one mid/side SILK frame pair according to `plan`
+    /// Decodes one mid/side SILK frame pair into `pair` according to `plan`
     /// ([RFC 6716 Section 4.2.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7>)).
     fn decode_silk_frame_pair(
         &mut self,
         range_decoder: &mut entropy::Decoder<'_>,
         plan: FramePairPlan,
-    ) -> Result<SilkChannelFramePair> {
+        pair: &mut SilkChannelFramePair,
+    ) -> Result<()> {
         let is_lbrr = plan.kind == FrameKind::Lbrr;
         let decode_mid = !is_lbrr || plan.mid_active;
 
@@ -271,12 +287,23 @@ impl Decoder {
             .map_or((None, false), |(weights, mid_only)| (Some(weights), mid_only));
 
         let layout = self.layout;
-        let mut mid = decode_mid
-            .then(|| self.decode_single_silk_frame(range_decoder, 0, &plan, plan.mid_coding))
-            .transpose()?
-            .unwrap_or_else(|| Frame::for_layout(&layout));
-        mid.stereo_weights = stereo_weights;
-        mid.mid_only = mid_only;
+        match decode_mid {
+            true => {
+                self.decode_single_silk_frame(
+                    range_decoder,
+                    0,
+                    &plan,
+                    plan.mid_coding,
+                    &mut pair.mid,
+                )?;
+            }
+            false => {
+                pair.mid.reset_for_layout(&layout);
+                pair.mid.output_pcm[..pair.mid.sample_count].fill(0);
+            }
+        }
+        pair.mid.stereo_weights = stereo_weights;
+        pair.mid.mid_only = mid_only;
 
         let decode_side = match plan.kind {
             FrameKind::Lbrr => plan.is_stereo && plan.side_active,
@@ -285,24 +312,26 @@ impl Decoder {
         if decode_side && !is_lbrr && self.prev_decode_only_middle {
             self.channels[1].reset_after_mid_only();
         }
-        let side = decode_side
-            .then(|| self.decode_single_silk_frame(range_decoder, 1, &plan, plan.side_coding))
-            .transpose()?
-            .map(|mut side| {
+        match decode_side {
+            true => {
+                let side = pair.side.get_or_insert_with(Frame::default);
+                self.decode_single_silk_frame(range_decoder, 1, &plan, plan.side_coding, side)?;
                 side.stereo_weights = stereo_weights;
                 side.mid_only = mid_only;
-                return side;
-            });
+            }
+            false => pair.side = None,
+        }
 
         if plan.is_stereo && !is_lbrr {
             self.prev_decode_only_middle = mid_only;
         }
-
-        return Ok(SilkChannelFramePair { stereo_weights, mid, side });
+        pair.stereo_weights = stereo_weights;
+        return Ok(());
     }
 
-    /// Decodes the parameters of one SILK channel frame and, for a regular frame, synthesises
-    /// its output ([RFC 6716 Section 4.2.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7>)).
+    /// Decodes the parameters of one SILK channel frame into `frame` and, for a regular frame,
+    /// synthesises its output
+    /// ([RFC 6716 Section 4.2.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7>)).
     /// An LBRR frame stops after excitation decoding: its parameters only advance the range
     /// decoder ([Section 4.2.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.5>)).
     fn decode_single_silk_frame(
@@ -311,14 +340,15 @@ impl Decoder {
         channel: usize,
         plan: &FramePairPlan,
         coding_mode: CodingMode,
-    ) -> Result<Frame> {
+        frame: &mut Frame,
+    ) -> Result<()> {
         let layout = self.layout;
         let is_lbrr = plan.kind == FrameKind::Lbrr;
         let vad_flag = match channel {
             0 => plan.mid_active,
             _ => plan.side_active,
         };
-        let mut frame = Frame::for_layout(&layout);
+        frame.reset_for_layout(&layout);
         frame.vad_flag = vad_flag;
         frame.lbrr_flag = match plan.kind {
             FrameKind::Regular { lbrr_present } => lbrr_present,
@@ -330,23 +360,23 @@ impl Decoder {
             FrameKind::Lbrr => &mut self.lbrr_references[channel],
             FrameKind::Regular { .. } => &mut self.channels[channel].core.references,
         };
-        references.decode_gains(range_decoder, &mut frame, coding_mode)?;
-        references.decode_lsf(range_decoder, &mut frame, &layout)?;
+        references.decode_gains(range_decoder, frame, coding_mode)?;
+        references.decode_lsf(range_decoder, frame, &layout)?;
         if frame.frame_type.signal_type == SignalType::Voiced {
-            references.decode_ltp(range_decoder, &mut frame, &layout, coding_mode)?;
+            references.decode_ltp(range_decoder, frame, &layout, coding_mode)?;
         }
         references.finish_frame(frame.frame_type.signal_type);
-        decode_lcg_seed(range_decoder, &mut frame)?;
-        decode_excitation(range_decoder, &mut frame)?;
+        decode_lcg_seed(range_decoder, frame)?;
+        decode_excitation(range_decoder, frame)?;
         if is_lbrr {
-            return Ok(frame);
+            return Ok(());
         }
 
         let decoder = &mut self.channels[channel];
-        decoder.plc.expand_lpc_after_loss(&mut frame);
-        decoder.core.synthesize_frame(&mut frame)?;
-        decoder.finish_decoded_frame(&mut frame)?;
-        return Ok(frame);
+        decoder.plc.expand_lpc_after_loss(frame);
+        decoder.core.synthesize_frame(frame)?;
+        decoder.finish_decoded_frame(frame)?;
+        return Ok(());
     }
 
     /// Unmixes (or, for mono output, delays) a decoded frame pair, resamples it to the output
@@ -362,13 +392,15 @@ impl Decoder {
         is_stereo: bool,
         stereo_to_mono: bool,
         out: Planes<'_>,
+        unmix_buf: &mut [[i16; UNMIX_BUFFER_SAMPLES]; 2],
     ) -> Result<usize> {
         let frame_length = pair.mid.sample_count;
         if frame_length == 0 || frame_length > MAX_FRAME_SAMPLES {
             return Err(Error::InvalidFrameSize.into());
         }
         let Planes { left, right } = out;
-        let [mid, side] = self.unmix_frame_pair(pair, is_stereo && right.is_some());
+        self.unmix_frame_pair(pair, is_stereo && right.is_some(), unmix_buf);
+        let [mid, side] = &*unmix_buf;
 
         let delayed = 1..1 + frame_length;
         let left_resampler = &mut self.channels[0].core.resampler;
@@ -381,8 +413,8 @@ impl Decoder {
             return Err(Error::BufferOverflow.into());
         }
         let right_source = match (is_stereo, stereo_to_mono) {
-            (true, _) => &side,
-            (false, true) => &mid,
+            (true, _) => side,
+            (false, true) => mid,
             (false, false) => {
                 right[..written].copy_from_slice(&left[..written]);
                 return Ok(written);
@@ -392,27 +424,29 @@ impl Decoder {
         return Ok(written);
     }
 
-    /// Places the decoded mid and side frames after the two samples of stereo history and
-    /// unmixes them into left and right, or only delays the mid channel when `unmix` is off
+    /// Places the decoded mid and side frames after the two samples of stereo history in
+    /// `unmix_buf` and unmixes them into left and right, or only delays the mid channel when
+    /// `unmix` is off
     /// ([RFC 6716 Section 4.2.8](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.8>)).
     fn unmix_frame_pair(
         &mut self,
         pair: &SilkChannelFramePair,
         unmix: bool,
-    ) -> [[i16; UNMIX_BUFFER_SAMPLES]; 2] {
+        unmix_buf: &mut [[i16; UNMIX_BUFFER_SAMPLES]; 2],
+    ) {
         let frame_length = pair.mid.sample_count;
         let frame = STEREO_HISTORY_SAMPLES..STEREO_HISTORY_SAMPLES + frame_length;
-        let mut mid = [0i16; UNMIX_BUFFER_SAMPLES];
-        let mut side = [0i16; UNMIX_BUFFER_SAMPLES];
+        let [mid, side] = unmix_buf;
         mid[frame.clone()].copy_from_slice(&pair.mid.output_pcm[..frame_length]);
-        if let Some(side_frame) = &pair.side {
-            side[frame.clone()].copy_from_slice(&side_frame.output_pcm[..frame_length]);
-        }
 
         let buffered = frame.end;
         if !unmix {
             buffer_mono_mid(&mut self.stereo, &mut mid[..buffered], frame_length);
-            return [mid, side];
+            return;
+        }
+        match &pair.side {
+            Some(side_frame) => side[frame].copy_from_slice(&side_frame.output_pcm[..frame_length]),
+            None => side[frame].fill(0),
         }
         let [w0_q13, w1_q13] = self.stereo.prediction_prev_q13;
         let weights = pair.stereo_weights.unwrap_or(StereoWeights { w0_q13, w1_q13 });
@@ -426,7 +460,6 @@ impl Decoder {
             sample_rate_khz,
             frame_length,
         );
-        return [mid, side];
     }
 }
 
