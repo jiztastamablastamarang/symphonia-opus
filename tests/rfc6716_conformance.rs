@@ -136,3 +136,53 @@ fn rfc8251_reference_decoder_sample_comparison() {
         failures.join("\n")
     );
 }
+
+/// Prints a bit-exact output digest for each of the 120 `(vector, rate, layout)` runs, once as
+/// recorded and once with every 7th packet lost, so that two builds can be compared with `diff`.
+#[test]
+#[ignore = "needs OPUS_TESTVECTORS_DIR with the RFC 8251 test vectors"]
+fn rfc8251_output_digest() {
+    let vec_dir = vectors_dir();
+    let files: Vec<Vec<u8>> = (1..=TEST_VECTOR_COUNT)
+        .map(|vector| read_file(&vec_dir.join(format!("testvector{vector:02}.bit"))))
+        .collect();
+    let mut runs = Vec::with_capacity(2 * files.len() * SAMPLE_RATES.len() * LAYOUTS.len());
+    for loss in [Loss::None, Loss::EVERY_7TH] {
+        for &rate in &SAMPLE_RATES {
+            for &layout in &LAYOUTS {
+                for vector in 1..=TEST_VECTOR_COUNT {
+                    runs.push((loss, rate, layout, vector));
+                }
+            }
+        }
+    }
+
+    let workers = std::thread::available_parallelism().map_or(1, usize::from).min(MAX_WORKERS);
+    let mut lines: Vec<DigestLine> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|i| {
+                let runs = runs.as_slice();
+                let files = files.as_slice();
+                scope.spawn(move || {
+                    runs.iter()
+                        .skip(i)
+                        .step_by(workers)
+                        .map(|&(loss, rate, layout, vector)| {
+                            let records = parse_bit_records(&files[vector - 1])
+                                .unwrap_or_else(|err| panic!("testvector{vector:02}: {err}"));
+                            let digest = output_digest(&records, rate, layout, loss);
+                            DigestLine { loss, rate, layout, vector, digest }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("digest worker panicked"))
+            .collect()
+    });
+    lines.sort_by_key(|line| (line.loss, line.rate, line.layout.channels(), line.vector));
+    lines.iter().for_each(|line| println!("{line}"));
+    assert_eq!(lines.len(), runs.len());
+}

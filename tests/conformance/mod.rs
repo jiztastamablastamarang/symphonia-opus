@@ -3,12 +3,14 @@
 
 mod compare;
 mod decode;
+mod digest;
 pub(crate) mod opus_compare;
 mod records;
 mod report;
 
 pub(crate) use compare::*;
 pub(crate) use decode::*;
+pub(crate) use digest::*;
 pub(crate) use records::*;
 pub(crate) use report::*;
 
