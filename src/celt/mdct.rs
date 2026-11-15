@@ -121,13 +121,15 @@ fn pre_rotate<const N4: usize>(
     if stride == 1 {
         let coeffs = &input[..n2];
         for (((pair, rev_pair), &t), &rev) in coeffs
-            .chunks_exact(2)
-            .zip(coeffs.chunks_exact(2).rev())
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(coeffs.as_chunks::<2>().0.iter().rev())
             .zip(&trig[..N4])
             .zip(&bitrev[..N4])
         {
-            let x1 = pair[0];
-            let x2 = rev_pair[1];
+            let [x1, _] = *pair;
+            let [_, x2] = *rev_pair;
             let yr = x2 * t.r + x1 * t.i;
             let yi = x1 * t.r - x2 * t.i;
             fft_buf[usize::from(rev)] = Complex32::new(yi, yr);
@@ -167,8 +169,8 @@ fn post_rotate<const N4: usize>(
         .zip(fft_back.iter().rev())
         .zip(trig_front.iter())
         .zip(trig_back.iter().rev())
-        .zip(front_out.chunks_exact_mut(2))
-        .zip(back_out.chunks_exact_mut(2).rev())
+        .zip(front_out.as_chunks_mut::<2>().0.iter_mut())
+        .zip(back_out.as_chunks_mut::<2>().0.iter_mut().rev())
     {
         // Swap real/imag back from the forward-FFT conjugation trick: `re = c.i`, `im = c.r`.
         let re0 = c0.i;
@@ -181,10 +183,8 @@ fn post_rotate<const N4: usize>(
         let yr1 = re1 * t1.r + im1 * t1.i;
         let yi1 = re1 * t1.i - im1 * t1.r;
 
-        front_pair[0] = yr0;
-        front_pair[1] = yi1;
-        back_pair[0] = yr1;
-        back_pair[1] = yi0;
+        *front_pair = [yr0, yi1];
+        *back_pair = [yr1, yi0];
     }
     return;
 }

@@ -216,11 +216,14 @@ pub fn compare(
 
 /// Reads the stereo reference and downmixes it for a mono comparison.
 fn reference_signal(reference: &[i16], channels: usize) -> Vec<f32> {
-    let frames = reference.chunks_exact(2);
+    let frames = reference.as_chunks::<2>().0;
     if channels == 2 {
-        return frames.flatten().map(|&sample| f32::from(sample)).collect();
+        return frames.as_flattened().iter().map(|&sample| f32::from(sample)).collect();
     }
-    return frames.map(|lr| (0.5 * (f64::from(lr[0]) + f64::from(lr[1]))) as f32).collect();
+    return frames
+        .iter()
+        .map(|&[left, right]| (0.5 * (f64::from(left) + f64::from(right))) as f32)
+        .collect();
 }
 
 /// `OPUS_COSF` and `OPUS_SINF`: the float argument is evaluated in double precision.

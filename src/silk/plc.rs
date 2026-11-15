@@ -184,25 +184,21 @@ pub(crate) fn sum_sqr_shift(samples: &[i16]) -> (i32, i32) {
     return (energy, shift);
 }
 
+/// Square of a 16-bit sample. It is at most `2^30`, so the `u32` result is exact.
+#[inline]
+fn square_u32(sample: i16) -> u32 {
+    return i32::from(sample).pow(2).unsigned_abs();
+}
+
 /// Accumulates pairwise sums of squares right-shifted by `shift` starting from `initial`.
 #[inline]
 fn accumulate_shifted_pair_squares(samples: &[i16], initial: i32, shift: u32) -> i32 {
-    let mut acc = initial as u32;
-    let mut chunks = samples.chunks_exact(2);
-
-    for pair in chunks.by_ref() {
-        let sq0 = ((pair[0] as i32) * (pair[0] as i32)) as u32;
-        let sq1 = ((pair[1] as i32) * (pair[1] as i32)) as u32;
-        let pair_sum = sq0.wrapping_add(sq1);
-        acc = acc.wrapping_add(pair_sum >> shift);
-    }
-
-    if let Some(&rem) = chunks.remainder().first() {
-        let sq = ((rem as i32) * (rem as i32)) as u32;
-        acc = acc.wrapping_add(sq >> shift);
-    }
-
-    return acc as i32;
+    let (pairs, rem) = samples.as_chunks::<2>();
+    let acc = pairs.iter().fold(initial.cast_unsigned(), |acc, &[s0, s1]| {
+        acc.wrapping_add(square_u32(s0).wrapping_add(square_u32(s1)) >> shift)
+    });
+    let acc = rem.iter().fold(acc, |acc, &sample| acc.wrapping_add(square_u32(sample) >> shift));
+    return acc.cast_signed();
 }
 
 /// Scales one subframe of Q14 excitation by `gain_q10` into saturated Q6 PCM and returns its

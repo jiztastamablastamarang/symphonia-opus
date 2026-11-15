@@ -489,12 +489,14 @@ fn up2_hq(iir_state: &mut [i32; 2 * ALLPASS_SECTIONS], out: &mut [i16], input: &
     let [e0, e1, e2, o0, o1, o2] = *iir_state;
     let mut even_state = [e0, e1, e2];
     let mut odd_state = [o0, o1, o2];
-    for (out_pair, &sample) in out.chunks_exact_mut(2).zip(input.iter()) {
-        let in_q10 = (sample as i32) << UP2_STATE_Q10_SHIFT;
+    for (out_pair, &sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(input.iter()) {
+        let in_q10 = i32::from(sample) << UP2_STATE_Q10_SHIFT;
         let even_q10 = allpass_cascade(&mut even_state, &RESAMPLER_UP2_HQ_0, in_q10);
         let odd_q10 = allpass_cascade(&mut odd_state, &RESAMPLER_UP2_HQ_1, in_q10);
-        out_pair[0] = saturate_i16(round_shift(even_q10, UP2_STATE_Q10_SHIFT));
-        out_pair[1] = saturate_i16(round_shift(odd_q10, UP2_STATE_Q10_SHIFT));
+        *out_pair = [
+            saturate_i16(round_shift(even_q10, UP2_STATE_Q10_SHIFT)),
+            saturate_i16(round_shift(odd_q10, UP2_STATE_Q10_SHIFT)),
+        ];
     }
     *iir_state =
         [even_state[0], even_state[1], even_state[2], odd_state[0], odd_state[1], odd_state[2]];

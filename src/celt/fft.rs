@@ -175,22 +175,20 @@ fn digit_reversal_recursive(
 /// Radix-4 butterfly over a span of one point (innermost stage, no twiddles).
 #[inline]
 fn butterfly_radix4_base(fout: &mut [Complex32]) {
-    for quad in fout.chunks_exact_mut(4) {
-        let f0 = quad[0];
-        let f1 = quad[1];
-        let f2 = quad[2];
-        let f3 = quad[3];
+    for quad in fout.as_chunks_mut::<4>().0 {
+        let [f0, f1, f2, f3] = *quad;
 
         let scratch0 = f0.sub(f2);
         let f0_plus_f2 = f0.add(f2);
         let scratch1 = f1.add(f3);
         let scratch2 = f1.sub(f3);
 
-        quad[2] = f0_plus_f2.sub(scratch1);
-        quad[0] = f0_plus_f2.add(scratch1);
-
-        quad[1] = Complex32::new(scratch0.r + scratch2.i, scratch0.i - scratch2.r);
-        quad[3] = Complex32::new(scratch0.r - scratch2.i, scratch0.i + scratch2.r);
+        *quad = [
+            f0_plus_f2.add(scratch1),
+            Complex32::new(scratch0.r + scratch2.i, scratch0.i - scratch2.r),
+            f0_plus_f2.sub(scratch1),
+            Complex32::new(scratch0.r - scratch2.i, scratch0.i + scratch2.r),
+        ];
     }
     return;
 }
@@ -247,7 +245,7 @@ fn butterfly_radix4(
 fn butterfly_radix2(fout: &mut [Complex32], fstride: usize, twiddles: &[Complex32; MDCT_MAX_N4]) {
     const SPAN: usize = 4;
     const GROUP_LEN: usize = 2 * SPAN;
-    for group in fout.chunks_exact_mut(GROUP_LEN) {
+    for group in fout.as_chunks_mut::<GROUP_LEN>().0 {
         let (leg0, leg1) = group.split_at_mut(SPAN);
         for (j, (f0_slot, f1_slot)) in leg0.iter_mut().zip(leg1.iter_mut()).enumerate() {
             let tw = twiddles[j * fstride];

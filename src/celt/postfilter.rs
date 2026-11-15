@@ -246,18 +246,13 @@ fn filter_in_place(
     let same_filter = g0 == g1 && period0 == period1 && from.tapset == to.tapset;
     let xfade_len = if same_filter { 0 } else { OVERLAP.min(n) };
 
-    let xfade_windows = CELT_WINDOW[..xfade_len].chunks_exact(LANES);
-    let xfade_rem = xfade_windows.remainder();
+    let (xfade_windows, xfade_rem) = CELT_WINDOW[..xfade_len].as_chunks::<LANES>();
     let xfade_vec_len = xfade_len - xfade_rem.len();
-    for (chunk_step, win_slice) in xfade_windows.enumerate() {
+    for (chunk_step, win) in xfade_windows.iter().enumerate() {
         let pos = history_offset + chunk_step * LANES;
         let (past, rest) = signal_buf.split_at_mut(pos);
-        let (Some(current), Some(win), Some(taps0), Some(taps1)) = (
-            rest.first_chunk_mut::<LANES>(),
-            win_slice.first_chunk::<LANES>(),
-            tap_window(past, period0),
-            tap_window(past, period1),
-        )
+        let (Some(current), Some(taps0), Some(taps1)) =
+            (rest.first_chunk_mut::<LANES>(), tap_window(past, period0), tap_window(past, period1))
         else {
             return;
         };
