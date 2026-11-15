@@ -6,8 +6,17 @@
 //! 20 ms frame. The per-bandwidth tables are grouped behind [`NlsfCodebook`]; the conversion to
 //! LPC coefficients lives in [`crate::silk::lpc`].
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
+use crate::convert::{BoundedFrom, wrap_i16};
 use crate::entropy::{self, Cdf};
 use crate::fixed::sqrt_approx;
 use crate::silk::constant;
@@ -262,7 +271,7 @@ impl CodingReferences {
         let (nlsf0_q15, a0_q12) = interpolate
             .then(|| {
                 let nlsf0_q15 = interpolate_nlsf_q15(&self.prev_nlsf_q15, &nlsf_q15, order, w_q2);
-                return nlsf_to_lpc_q12(&nlsf0_q15[..order]).map(|a0_q12| (nlsf0_q15, a0_q12));
+                nlsf_to_lpc_q12(&nlsf0_q15[..order]).map(|a0_q12| (nlsf0_q15, a0_q12))
             })
             .transpose()?
             .unwrap_or((nlsf_q15, a1_q12));
@@ -306,7 +315,7 @@ fn decode_lsf_stage1(
     codebook: NlsfCodebook,
     signal_type: SignalType,
 ) -> Result<usize> {
-    return Ok(decoder.decode_symbol(codebook.stage_one_cdf(signal_type))? as usize);
+    return Ok(usize::from(decoder.decode_symbol(codebook.stage_one_cdf(signal_type))?));
 }
 
 /// Decodes the second-stage residual index of every coefficient, including the extension of
@@ -319,12 +328,12 @@ fn decode_lsf_stage2_indices(
 ) -> Result<[i16; MAX_LPC_ORDER]> {
     let mut indices = [0i16; MAX_LPC_ORDER];
     for (index, &selector) in indices.iter_mut().zip(codebook.stage_two_cdf_selectors(i1).iter()) {
-        let cdf = constant::CDF_NORMALIZED_LSF_STAGE_TWO_INDEX[selector as usize];
-        let mut value = (decoder.decode_symbol(cdf)? as i16) - NLSF_STAGE_TWO_INDEX_OFFSET;
+        let cdf = constant::CDF_NORMALIZED_LSF_STAGE_TWO_INDEX[usize::from(selector)];
+        let mut value = i16::from(decoder.decode_symbol(cdf)?) - NLSF_STAGE_TWO_INDEX_OFFSET;
         if value.abs() == NLSF_STAGE_TWO_EXTENSION_MAGNITUDE {
-            let extension = decoder
-                .decode_symbol(constant::CDF_NORMALIZED_LSF_STAGE_TWO_INDEX_EXTENSION)?
-                as i16;
+            let extension = i16::from(
+                decoder.decode_symbol(constant::CDF_NORMALIZED_LSF_STAGE_TWO_INDEX_EXTENSION)?,
+            );
             value += if value < 0 { -extension } else { extension };
         }
         *index = value;
@@ -341,17 +350,22 @@ fn dequantize_lsf_residual_q10(
     indices: &[i16; MAX_LPC_ORDER],
 ) -> [i16; MAX_LPC_ORDER] {
     let order = codebook.order();
-    let qstep_q16 = codebook.quantization_step_q16() as i64;
+    let qstep_q16 = i64::from(codebook.quantization_step_q16());
     let mut res_q10 = [0i16; MAX_LPC_ORDER];
-    for i in (0..order).rev() {
-        let pred_q10 = res_q10[..order].get(i + 1).map_or(0, |&next_q10| {
-            ((next_q10 as i32) * codebook.prediction_weight_q8(i1, i))
+    // Residual of the next higher coefficient; the highest coefficient has no predictor.
+    let mut next_q10: Option<i16> = None;
+    for (i, (res, &index)) in res_q10[..order].iter_mut().zip(indices).enumerate().rev() {
+        let pred_q10 = next_q10.map_or(0, |next_q10| {
+            (i32::from(next_q10) * codebook.prediction_weight_q8(i1, i))
                 >> NLSF_PREDICTION_WEIGHT_Q8_SHIFT
         });
-        let level_q10 = quantization_level_q10(indices[i]) as i64;
-        res_q10[i] = (pred_q10
-            + (((level_q10 * qstep_q16) >> NLSF_QUANTIZATION_STEP_Q16_SHIFT) as i32))
-            as i16;
+        // A Q10 level of at most about 10 << 10 times a step below 2^14 stays far inside `i32`.
+        let step_q10 = i32::bounded_from(
+            (i64::from(quantization_level_q10(index)) * qstep_q16)
+                >> NLSF_QUANTIZATION_STEP_Q16_SHIFT,
+        );
+        *res = wrap_i16(pred_q10 + step_q10);
+        next_q10 = Some(*res);
     }
     return res_q10;
 }
@@ -360,7 +374,7 @@ fn dequantize_lsf_residual_q10(
 /// ([RFC 6716 Section 4.2.7.5.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.5.2>)).
 #[inline]
 fn quantization_level_q10(index: i16) -> i32 {
-    let index = index as i32;
+    let index = i32::from(index);
     return match index.cmp(&0) {
         std::cmp::Ordering::Greater => {
             (index << NLSF_INDEX_TO_Q10_SHIFT)
@@ -383,19 +397,33 @@ fn reconstruct_nlsf_q15(
     res_q10: &[i16; MAX_LPC_ORDER],
 ) -> [i16; MAX_LPC_ORDER] {
     let cb1_q8 = codebook.stage_one_vector_q8(i1);
-    return std::array::from_fn(|i| {
-        return cb1_q8.get(i).map_or(0, |&cb1_cur| {
-            let cb1_cur = i32::from(cb1_cur);
-            let cb1_prev = i.checked_sub(1).map_or(0, |j| i32::from(cb1_q8[j]));
-            let cb1_next =
-                cb1_q8.get(i + 1).map_or(NLSF_CODEBOOK_RANGE_Q8, |&next| i32::from(next));
-            let w_q9 = inverse_spacing_weight_q9(cb1_prev, cb1_cur, cb1_next);
-            let weighted_residual_q15 =
-                (i32::from(res_q10[i]) << NLSF_RESIDUAL_Q10_TO_Q24_SHIFT) / w_q9;
-            return ((cb1_cur << NLSF_CODEBOOK_Q8_TO_Q15_SHIFT) + weighted_residual_q15)
-                .clamp(0, NLSF_MAX_Q15) as i16;
-        });
-    });
+    let neighbours = with_neighbours(cb1_q8, 0, NLSF_CODEBOOK_RANGE_Q8);
+    let mut nlsf_q15 = [0i16; MAX_LPC_ORDER];
+    let windows = neighbours.array_windows::<3>().take(cb1_q8.len());
+    for ((nlsf, &[cb1_prev, cb1_cur, cb1_next]), &res) in
+        nlsf_q15.iter_mut().zip(windows).zip(res_q10)
+    {
+        let w_q9 = inverse_spacing_weight_q9(cb1_prev, cb1_cur, cb1_next);
+        let weighted_residual_q15 = (i32::from(res) << NLSF_RESIDUAL_Q10_TO_Q24_SHIFT) / w_q9;
+        let unclamped_q15 = (cb1_cur << NLSF_CODEBOOK_Q8_TO_Q15_SHIFT) + weighted_residual_q15;
+        *nlsf = i16::bounded_from(unclamped_q15.clamp(0, NLSF_MAX_Q15));
+    }
+    return nlsf_q15;
+}
+
+/// `values` widened to `i32` between `low` and `high`: the first `values.len() + 2` entries are
+/// `[low, values..., high]`, so that a window of three gives every value both neighbours.
+fn with_neighbours<T: Copy + Into<i32>>(
+    values: &[T],
+    low: i32,
+    high: i32,
+) -> [i32; MAX_LPC_ORDER + 2] {
+    let mut padded = [high; MAX_LPC_ORDER + 2];
+    padded[0] = low;
+    for (slot, &value) in padded[1..].iter_mut().zip(values) {
+        *slot = value.into();
+    }
+    return padded;
 }
 
 /// Q9 weight of a codebook entry, the square root of the summed inverse distances to its
@@ -436,17 +464,19 @@ fn stabilize_nlsf(nlsf_q15: &mut [i16], codebook: NlsfCodebook) -> Result<()> {
 /// Smallest margin above the minimum spacing over all gaps, including the gaps to both range
 /// ends, and the index of the gap (RFC 6716 Section 4.2.7.5.4).
 fn smallest_spacing_margin(nlsf_q15: &[i16], min_delta: &[i32]) -> (i32, usize) {
-    let order = nlsf_q15.len();
-    let (min_diff, min_i) =
-        (1..order).fold((nlsf_q15[0] as i32 - min_delta[0], 0usize), |(best_diff, best_i), i| {
-            let diff = nlsf_q15[i] as i32 - (nlsf_q15[i - 1] as i32 + min_delta[i]);
-            if diff < best_diff { (diff, i) } else { (best_diff, best_i) }
-        });
-    let upper_diff = NLSF_RANGE_Q15 - (nlsf_q15[order - 1] as i32 + min_delta[order]);
-    if upper_diff < min_diff {
-        return (upper_diff, order);
-    }
-    return (min_diff, min_i);
+    let edges = with_neighbours(nlsf_q15, 0, NLSF_RANGE_Q15);
+    let gaps = edges.array_windows::<2>().zip(min_delta).take(nlsf_q15.len() + 1);
+    // The first smallest margin wins, as in the RFC's ascending search.
+    return gaps.enumerate().fold(
+        (i32::MAX, 0),
+        |(best_diff, best_i), (i, (&[lower, upper], &delta))| {
+            let diff = upper - (lower + delta);
+            match diff < best_diff {
+                true => (diff, i),
+                false => (best_diff, best_i),
+            }
+        },
+    );
 }
 
 /// Moves the two NLSFs around gap `i` apart to the minimum spacing, around their centre when
@@ -455,10 +485,10 @@ fn widen_spacing_at(nlsf_q15: &mut [i16], min_delta: &[i32], i: usize) {
     let order = nlsf_q15.len();
     match i {
         0 => {
-            nlsf_q15[0] = min_delta[0] as i16;
+            nlsf_q15[0] = i16::bounded_from(min_delta[0]);
         }
         i if i == order => {
-            nlsf_q15[order - 1] = (NLSF_RANGE_Q15 - min_delta[order]) as i16;
+            nlsf_q15[order - 1] = i16::bounded_from(NLSF_RANGE_Q15 - min_delta[order]);
         }
         i => {
             let min_center_q15: i32 = min_delta[0..i].iter().sum::<i32>() + (min_delta[i] >> 1);
@@ -466,11 +496,12 @@ fn widen_spacing_at(nlsf_q15: &mut [i16], min_delta: &[i32], i: usize) {
                 - min_delta[(i + 1)..=order].iter().sum::<i32>()
                 - (min_delta[i] - (min_delta[i] >> 1));
 
-            let raw_center = (nlsf_q15[i - 1] as i32 + nlsf_q15[i] as i32 + 1) >> 1;
+            let raw_center = (i32::from(nlsf_q15[i - 1]) + i32::from(nlsf_q15[i]) + 1) >> 1;
             let center_freq_q15 = raw_center.clamp(min_center_q15, max_center_q15);
 
-            nlsf_q15[i - 1] = (center_freq_q15 - (min_delta[i] >> 1)) as i16;
-            nlsf_q15[i] = (nlsf_q15[i - 1] as i32 + min_delta[i]) as i16;
+            // The clamped centre keeps both NLSFs inside `0..2^15`.
+            nlsf_q15[i - 1] = i16::bounded_from(center_freq_q15 - (min_delta[i] >> 1));
+            nlsf_q15[i] = i16::bounded_from(i32::from(nlsf_q15[i - 1]) + min_delta[i]);
         }
     }
 }
@@ -480,17 +511,20 @@ fn widen_spacing_at(nlsf_q15: &mut [i16], min_delta: &[i32], i: usize) {
 /// (RFC 6716 Section 4.2.7.5.4; the lower bound saturates instead of wrapping,
 /// [RFC 8251 Section 7](<https://datatracker.ietf.org/doc/html/rfc8251#section-7>)).
 fn enforce_spacing_by_sorting(nlsf_q15: &mut [i16], min_delta: &[i32]) {
-    let order = nlsf_q15.len();
     nlsf_q15.sort_unstable();
-    for i in 0..order {
-        let prev = i.checked_sub(1).map_or(0, |j| nlsf_q15[j] as i32);
-        let lower_q15 = (prev + min_delta[i]).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-        nlsf_q15[i] = (nlsf_q15[i] as i32).max(lower_q15) as i16;
+    let mut prev = 0;
+    for (nlsf, &delta) in nlsf_q15.iter_mut().zip(min_delta) {
+        let lower_q15 = (prev + delta).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+        *nlsf = i16::bounded_from(i32::from(*nlsf).max(lower_q15));
+        prev = i32::from(*nlsf);
     }
-    for i in (0..order).rev() {
-        let next = nlsf_q15.get(i + 1).map_or(NLSF_RANGE_Q15, |&next| next as i32);
-        nlsf_q15[i] = (nlsf_q15[i] as i32).min(next - min_delta[i + 1]) as i16;
+    // The upper bound is stored with the reference decoder's 16-bit narrowing.
+    let mut next = NLSF_RANGE_Q15;
+    for (nlsf, &delta) in nlsf_q15.iter_mut().zip(&min_delta[1..]).rev() {
+        *nlsf = wrap_i16(i32::from(*nlsf).min(next - delta));
+        next = i32::from(*nlsf);
     }
+    return;
 }
 
 /// Interpolates the previous and current NLSFs with the Q2 weight for the first half of a
@@ -501,14 +535,16 @@ fn interpolate_nlsf_q15(
     order: usize,
     w_q2: u8,
 ) -> [i16; MAX_LPC_ORDER] {
-    return std::array::from_fn(|i| {
-        if i >= order {
-            return 0;
-        }
-        let prev = prev_nlsf_q15[i] as i32;
-        let curr = nlsf_q15[i] as i32;
-        return (prev + (((curr - prev) * i32::from(w_q2)) >> NLSF_INTERPOLATION_Q2_SHIFT)) as i16;
-    });
+    let mut interpolated = [0i16; MAX_LPC_ORDER];
+    let pairs = prev_nlsf_q15.iter().zip(nlsf_q15).take(order);
+    for (slot, (&prev, &curr)) in interpolated.iter_mut().zip(pairs) {
+        let (prev, curr) = (i32::from(prev), i32::from(curr));
+        // A weight of at most 1 keeps the result between `prev` and `curr`.
+        *slot = i16::bounded_from(
+            prev + (((curr - prev) * i32::from(w_q2)) >> NLSF_INTERPOLATION_Q2_SHIFT),
+        );
+    }
+    return interpolated;
 }
 
 #[cfg(test)]
@@ -543,14 +579,11 @@ mod tests {
             [32760, 10, 32700, 5, 20000, 100, 50, 40, 30, 20, 15, 12, 8, 4, 2, 0];
         stabilize_nlsf(&mut pathological_wb, NlsfCodebook::Wideband).unwrap();
         let min_delta_wb = &constant::MINIMUM_SPACING_NORMALIZED_LSF_WB;
-        assert!(pathological_wb[0] as i32 >= min_delta_wb[0]);
-        for i in 1..16 {
-            assert!(
-                pathological_wb[i] as i32 - pathological_wb[i - 1] as i32 >= min_delta_wb[i],
-                "WB NLSF spacing violated at index {i}"
-            );
+        let edges = with_neighbours(&pathological_wb, 0, NLSF_RANGE_Q15);
+        let gaps = edges.array_windows::<2>().zip(min_delta_wb);
+        for (i, (&[lower, upper], &delta)) in gaps.enumerate() {
+            assert!(upper - lower >= delta, "WB NLSF spacing violated at gap {i}");
         }
-        assert!((1 << 15) - (pathological_wb[15] as i32) >= min_delta_wb[16]);
     }
 
     /// RFC 8251 Section 7: enforcing the minimum NLSF spacing saturates at the Q15 ceiling and never
@@ -598,12 +631,12 @@ mod tests {
         assert_eq!(frame1.subframes[2].nlsf_q15[..10], EXPECTED_F1_NLSF_Q15);
         assert_eq!(frame1.subframes[3].nlsf_q15[..10], EXPECTED_F1_NLSF_Q15);
 
-        for i in 0..10 {
-            let expected = EXPECTED_F0_NLSF_Q15[i]
-                + (((EXPECTED_F1_NLSF_Q15[i] as i32 - EXPECTED_F0_NLSF_Q15[i] as i32) * 2) >> 2)
-                    as i16;
-            assert_eq!(frame1.subframes[0].nlsf_q15[i], expected);
-            assert_eq!(frame1.subframes[1].nlsf_q15[i], expected);
-        }
+        // Weight 2 of 4: halfway between the two frames.
+        let expected: [i16; 10] = std::array::from_fn(|i| {
+            let (f0, f1) = (i32::from(EXPECTED_F0_NLSF_Q15[i]), i32::from(EXPECTED_F1_NLSF_Q15[i]));
+            i16::bounded_from(f0 + (((f1 - f0) * 2) >> 2))
+        });
+        assert_eq!(frame1.subframes[0].nlsf_q15[..10], expected);
+        assert_eq!(frame1.subframes[1].nlsf_q15[..10], expected);
     }
 }
