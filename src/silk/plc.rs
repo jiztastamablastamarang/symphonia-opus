@@ -34,7 +34,7 @@
 //!                     +-----------------------------------+
 //! ```
 
-use crate::convert::{BoundedFrom, wrap_i16};
+use crate::convert::{BoundedFrom, reinterpret_signed, reinterpret_unsigned, wrap_i16};
 use crate::fixed::{
     mul_add_q16_i16, mul_low_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift, saturate_i16,
     sqrt_approx,
@@ -49,6 +49,7 @@ use crate::silk::{
     ChannelState, Frame, LTP_ORDER, MAX_FRAME_SAMPLES, MAX_LPC_ORDER, MAX_LTP_MEM_SAMPLES,
     MAX_SUBFRAME_SAMPLES, MAX_SUBFRAMES, SignalType, SilkLayout,
 };
+use crate::slices::array_chunks;
 
 /// Unit gain (`1.0`) in Q16 fixed-point representation (`65_536`).
 const UNIT_GAIN_Q16: i32 = 1 << 16;
@@ -181,7 +182,7 @@ pub(crate) fn sum_sqr_shift(samples: &[i16]) -> (i32, i32) {
 
     let first_pass_energy =
         accumulate_shifted_pair_squares(samples, len, first_shift.unsigned_abs());
-    let leading_zeros = i32::bounded_from(first_pass_energy.cast_unsigned().leading_zeros());
+    let leading_zeros = i32::bounded_from(reinterpret_unsigned(first_pass_energy).leading_zeros());
     let shift = (first_shift + 3 - leading_zeros).max(0);
 
     let energy = accumulate_shifted_pair_squares(samples, 0, shift.unsigned_abs());
@@ -197,12 +198,12 @@ fn square_u32(sample: i16) -> u32 {
 /// Accumulates pairwise sums of squares right-shifted by `shift` starting from `initial`.
 #[inline]
 fn accumulate_shifted_pair_squares(samples: &[i16], initial: i32, shift: u32) -> i32 {
-    let (pairs, rem) = samples.as_chunks::<2>();
-    let acc = pairs.iter().fold(initial.cast_unsigned(), |acc, &[s0, s1]| {
+    let (pairs, rem) = array_chunks::<_, 2>(samples);
+    let acc = pairs.fold(reinterpret_unsigned(initial), |acc, &[s0, s1]| {
         acc.wrapping_add(square_u32(s0).wrapping_add(square_u32(s1)) >> shift)
     });
     let acc = rem.iter().fold(acc, |acc, &sample| acc.wrapping_add(square_u32(sample) >> shift));
-    return acc.cast_signed();
+    return reinterpret_signed(acc);
 }
 
 /// Scales one subframe of Q14 excitation by `gain_q10` into saturated Q6 PCM and returns its
@@ -710,8 +711,9 @@ impl PlcState {
         }
 
         // `silk_CLZ32` of the signed energy minus one; `wrapping_shl` masks the shift like C.
-        let leading_zeros = i32::bounded_from(self.conc_energy.cast_unsigned().leading_zeros()) - 1;
-        self.conc_energy = self.conc_energy.wrapping_shl(leading_zeros.cast_unsigned());
+        let leading_zeros =
+            i32::bounded_from(reinterpret_unsigned(self.conc_energy).leading_zeros()) - 1;
+        self.conc_energy = self.conc_energy.wrapping_shl(reinterpret_unsigned(leading_zeros));
         let energy_rshift = (GLUE_FRAC_Q24_SHIFT - leading_zeros).max(0).unsigned_abs();
         energy = energy.checked_shr(energy_rshift).unwrap_or(0);
 

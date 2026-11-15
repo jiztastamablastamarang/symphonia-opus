@@ -277,7 +277,7 @@ fn single_frame<'a>(cursor: &mut &'a [u8], framing: Framing) -> Result<Frames<'a
 fn two_equal_frames<'a>(cursor: &mut &'a [u8], framing: Framing) -> Result<Frames<'a>, Error> {
     let len = match framing {
         Framing::Undelimited => {
-            if !cursor.len().is_multiple_of(2) {
+            if cursor.len() % 2 != 0 {
                 return Err(Error::OddCode1Payload);
             }
             check_frame_length(cursor.len() / 2)?
@@ -409,7 +409,7 @@ fn take_vbr_frames<'a>(
 
 /// Splits an undelimited CBR payload into `count` equal frames (rule R6).
 fn split_cbr_payload(mut payload: &[u8], count: usize) -> Result<Frames<'_>, Error> {
-    if !payload.len().is_multiple_of(count) {
+    if payload.len() % count != 0 {
         return Err(Error::UnevenCbrPayload);
     }
     let len = check_frame_length(payload.len() / count)?;

@@ -15,6 +15,7 @@ use crate::silk::constant;
 use crate::silk::error::Error;
 use crate::silk::lpc::nlsf_to_lpc_q12;
 use crate::silk::{CodingReferences, Frame, MAX_LPC_ORDER, SignalType, SilkLayout};
+use crate::slices::array_windows;
 use crate::toc::{Bandwidth, FrameDuration};
 
 /// Number of first-stage codebook vectors (RFC 6716 Section 4.2.7.5.1).
@@ -391,7 +392,7 @@ fn reconstruct_nlsf_q15(
     let cb1_q8 = codebook.stage_one_vector_q8(i1);
     let neighbours = with_neighbours(cb1_q8, 0, NLSF_CODEBOOK_RANGE_Q8);
     let mut nlsf_q15 = [0i16; MAX_LPC_ORDER];
-    let windows = neighbours.array_windows::<3>().take(cb1_q8.len());
+    let windows = array_windows::<_, 3>(&neighbours).take(cb1_q8.len());
     for ((nlsf, &[cb1_prev, cb1_cur, cb1_next]), &res) in
         nlsf_q15.iter_mut().zip(windows).zip(res_q10)
     {
@@ -457,7 +458,7 @@ fn stabilize_nlsf(nlsf_q15: &mut [i16], codebook: NlsfCodebook) -> Result<()> {
 /// ends, and the index of the gap (RFC 6716 Section 4.2.7.5.4).
 fn smallest_spacing_margin(nlsf_q15: &[i16], min_delta: &[i32]) -> (i32, usize) {
     let edges = with_neighbours(nlsf_q15, 0, NLSF_RANGE_Q15);
-    let gaps = edges.array_windows::<2>().zip(min_delta).take(nlsf_q15.len() + 1);
+    let gaps = array_windows::<_, 2>(&edges).zip(min_delta).take(nlsf_q15.len() + 1);
     // The first smallest margin wins, as in the RFC's ascending search.
     return gaps.enumerate().fold(
         (i32::MAX, 0),
@@ -572,7 +573,7 @@ mod tests {
         stabilize_nlsf(&mut pathological_wb, NlsfCodebook::Wideband).unwrap();
         let min_delta_wb = &constant::MINIMUM_SPACING_NORMALIZED_LSF_WB;
         let edges = with_neighbours(&pathological_wb, 0, NLSF_RANGE_Q15);
-        let gaps = edges.array_windows::<2>().zip(min_delta_wb);
+        let gaps = array_windows::<_, 2>(&edges).zip(min_delta_wb);
         for (i, (&[lower, upper], &delta)) in gaps.enumerate() {
             assert!(upper - lower >= delta, "WB NLSF spacing violated at gap {i}");
         }

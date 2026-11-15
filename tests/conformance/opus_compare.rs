@@ -217,13 +217,12 @@ pub fn compare(
 
 /// Reads the stereo reference and downmixes it for a mono comparison.
 fn reference_signal(reference: &[i16], channels: usize) -> Vec<f32> {
-    let frames = reference.as_chunks::<2>().0;
+    let frames = reference.chunks_exact(2).filter_map(|frame| <[i16; 2]>::try_from(frame).ok());
     if channels == 2 {
-        return frames.as_flattened().iter().map(|&sample| f32::from(sample)).collect();
+        return frames.flatten().map(f32::from).collect();
     }
     return frames
-        .iter()
-        .map(|&[left, right]| nearest_f32(0.5 * (f64::from(left) + f64::from(right))))
+        .map(|[left, right]| nearest_f32(0.5 * (f64::from(left) + f64::from(right))))
         .collect();
 }
 

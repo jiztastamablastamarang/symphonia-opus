@@ -2,7 +2,7 @@
 name = "symphonia-opus"
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.100"
+rust-version = "1.85"
 authors = ["Yevhen Bilyk <jiztastamablastamarang@gmail.com>"]
 description = "100% safe, pure-Rust Opus audio decoder (RFC 6716 / RFC 7845 / RFC 8251) for Symphonia."
 license = "MPL-2.0"

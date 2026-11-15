@@ -92,21 +92,25 @@ pub(crate) fn decode_excitation(
         (*pulse_count, *lsb_count) = decode_block_pulse_count(decoder, rate_level)?;
     }
 
-    let blocks = &mut pulses.as_chunks_mut::<SHELL_BLOCK_SAMPLES>().0[..num_blocks];
-    for (block, &pulse_count) in blocks.iter_mut().zip(pulse_counts.iter()) {
+    let blocks = &mut pulses[..num_blocks * SHELL_BLOCK_SAMPLES];
+    for (block, &pulse_count) in
+        blocks.chunks_exact_mut(SHELL_BLOCK_SAMPLES).zip(pulse_counts.iter())
+    {
         if pulse_count == 0 {
             block.fill(0);
             continue;
         }
         decode_shell_partition(decoder, block, pulse_count)?;
     }
-    for (block, &lsb_count) in
-        blocks.iter_mut().zip(lsb_counts.iter()).filter(|&(_, &lsb_count)| lsb_count > 0)
+    for (block, &lsb_count) in blocks
+        .chunks_exact_mut(SHELL_BLOCK_SAMPLES)
+        .zip(lsb_counts.iter())
+        .filter(|&(_, &lsb_count)| lsb_count > 0)
     {
         decode_block_lsbs(decoder, block, lsb_count)?;
     }
     for ((block, &pulse_count), _) in blocks
-        .iter_mut()
+        .chunks_exact_mut(SHELL_BLOCK_SAMPLES)
         .zip(pulse_counts.iter())
         .zip(lsb_counts.iter())
         .filter(|&((_, &pulse_count), &lsb_count)| pulse_count > 0 || lsb_count > 0)

@@ -740,6 +740,7 @@ pub(crate) static CELT_WINDOW: [f32; OVERLAP] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slices::array_windows;
 
     fn assert_valid_icdf(name: &str, icdf: &[u32]) {
         assert!(icdf.len() >= 3, "{name}: iCDF must have at least 3 elements");
@@ -841,7 +842,7 @@ mod tests {
     #[test]
     fn celt_window_princen_bradley_symmetry_and_monotonicity() {
         assert_eq!(CELT_WINDOW.len(), OVERLAP);
-        for (i, &[current, next]) in CELT_WINDOW.array_windows::<2>().enumerate() {
+        for (i, &[current, next]) in array_windows::<_, 2>(&CELT_WINDOW).enumerate() {
             assert!(current < next, "CELT_WINDOW must strictly increase at index {i}");
         }
         let halves = CELT_WINDOW.iter().zip(CELT_WINDOW.iter().rev()).take(OVERLAP / 2);

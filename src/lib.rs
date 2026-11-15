@@ -212,6 +212,7 @@ mod planes;
 mod routing;
 mod sample_rate;
 mod silk;
+mod slices;
 mod stream;
 #[cfg(test)]
 mod test_vectors;

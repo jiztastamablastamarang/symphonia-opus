@@ -26,7 +26,9 @@ use crate::celt::lcg_next;
 use crate::celt::rate::{
     CacheLevel, bits2pulses_at_level, get_pulses, max_cache_bits, pulses2bits_at_level,
 };
-use crate::convert::{BoundedFrom, ExactF32, nearest_f32, wrap_i16};
+use crate::convert::{
+    BoundedFrom, ExactF32, nearest_f32, reinterpret_signed, reinterpret_unsigned, wrap_i16,
+};
 use crate::entropy::Decoder;
 use crate::fixed::mul_low_i16;
 use crate::planes::Planes;
@@ -146,8 +148,8 @@ pub(crate) fn bitexact_cos(x: i16) -> i16 {
 /// for the split-angle bit allocation ([RFC 6716 Section 4.3.4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.4>)).
 pub(crate) fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
     // `EC_ILOG` of the signed inputs read as unsigned, as in the reference decoder.
-    let lc = bit_length(icos.cast_unsigned());
-    let ls = bit_length(isin.cast_unsigned());
+    let lc = bit_length(reinterpret_unsigned(icos));
+    let ls = bit_length(reinterpret_unsigned(isin));
     let icos_norm = icos << (15 - lc);
     let isin_norm = isin << (15 - ls);
     return (ls - lc) * (1 << 11)
@@ -709,7 +711,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         else {
             for dst in &mut x[..n] {
                 self.seed = lcg_next(self.seed);
-                *dst = (self.seed.cast_signed() >> LCG_NOISE_SHIFT).exact_f32();
+                *dst = (reinterpret_signed(self.seed) >> LCG_NOISE_SHIFT).exact_f32();
             }
             renormalise_vector(&mut x[..n], n, gain);
             return cm_mask;

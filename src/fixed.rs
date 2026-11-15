@@ -21,7 +21,7 @@
 //!   div_q(a, b, q)            i32, i32          (a << q) / b, about 16 significant bits
 //! ```
 
-use crate::convert::{BoundedFrom, wrap_i16, wrap_i32};
+use crate::convert::{BoundedFrom, reinterpret_unsigned, wrap_i16, wrap_i32};
 
 /// Multiplies a 32-bit value by a 16-bit value and drops 16 fractional bits: `(a * b) >> 16`.
 /// One of the bit-exact SILK fixed-point primitives of
@@ -152,7 +152,7 @@ pub(crate) fn reciprocal_q(b: i32, q_res: i32) -> i32 {
     }
 
     let b_headroom = headroom(b);
-    let b_normalized = b.wrapping_shl(b_headroom.cast_unsigned());
+    let b_normalized = b.wrapping_shl(reinterpret_unsigned(b_headroom));
     // The top 16 bits of an `i32` always fit in an `i16`.
     let denominator = b_normalized >> 16;
     if denominator == 0 {
@@ -190,9 +190,9 @@ pub(crate) fn div_q(a: i32, b: i32, q_res: i32) -> i32 {
     }
 
     let a_headroom = headroom(a);
-    let mut a_normalized = a.wrapping_shl(a_headroom.cast_unsigned());
+    let mut a_normalized = a.wrapping_shl(reinterpret_unsigned(a_headroom));
     let b_headroom = headroom(b);
-    let b_normalized = b.wrapping_shl(b_headroom.cast_unsigned());
+    let b_normalized = b.wrapping_shl(reinterpret_unsigned(b_headroom));
     // The top 16 bits of an `i32` always fit in an `i16`.
     let denominator = b_normalized >> 16;
     if denominator == 0 {
@@ -239,7 +239,7 @@ pub(crate) fn sqrt_approx(x: i32) -> i32 {
     let leading_zeros = i32::bounded_from(magnitude.leading_zeros());
     // `rotate_right` reduces modulo 32, so a negative rotation becomes the matching left
     // rotation, as in `silk_ROR32`.
-    let rotation = (SQRT_FRACTION_END - leading_zeros).cast_unsigned();
+    let rotation = reinterpret_unsigned(SQRT_FRACTION_END - leading_zeros);
     let fraction = i32::bounded_from(magnitude.rotate_right(rotation) & SQRT_FRACTION_MASK);
     let base = if (leading_zeros & 1) != 0 { SQRT_BASE_ODD } else { SQRT_BASE_EVEN };
     let y = base >> (leading_zeros >> 1);

@@ -7,6 +7,7 @@ use crate::celt::constant::{CELT_WINDOW, OVERLAP};
 use crate::celt::fft::{Complex32, MixedRadixPlan};
 use crate::celt::{BlockSize, MAX_FRAME_SIZE, MAX_LM, SHORT_MDCT_SIZE};
 use crate::convert::{BoundedFrom, nearest_f32};
+use crate::slices::{array_chunks, array_chunks_mut};
 
 /// Maximum full-window MDCT length at 48 kHz (`2 * MAX_FRAME_SIZE = 1920` samples).
 pub(crate) const MDCT_MAX_N: usize = 2 * MAX_FRAME_SIZE;
@@ -124,11 +125,9 @@ fn pre_rotate<const N4: usize>(
     let n2 = 2 * N4;
     if stride == 1 {
         let coeffs = &input[..n2];
-        for (((pair, rev_pair), &t), &rev) in coeffs
-            .as_chunks::<2>()
+        for (((pair, rev_pair), &t), &rev) in array_chunks::<_, 2>(coeffs)
             .0
-            .iter()
-            .zip(coeffs.as_chunks::<2>().0.iter().rev())
+            .zip(array_chunks::<_, 2>(coeffs).0.rev())
             .zip(&trig[..N4])
             .zip(&bitrev[..N4])
         {
@@ -173,8 +172,8 @@ fn post_rotate<const N4: usize>(
         .zip(fft_back.iter().rev())
         .zip(trig_front.iter())
         .zip(trig_back.iter().rev())
-        .zip(front_out.as_chunks_mut::<2>().0.iter_mut())
-        .zip(back_out.as_chunks_mut::<2>().0.iter_mut().rev())
+        .zip(array_chunks_mut::<_, 2>(front_out))
+        .zip(array_chunks_mut::<_, 2>(back_out).rev())
     {
         // Swap real/imag back from the forward-FFT conjugation trick: `re = c.i`, `im = c.r`.
         let re0 = c0.i;

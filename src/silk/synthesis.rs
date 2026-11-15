@@ -21,6 +21,7 @@ use crate::silk::{
     ChannelState, Frame, LTP_ORDER, MAX_FRAME_SAMPLES, MAX_LPC_ORDER, MAX_LTP_MEM_SAMPLES,
     MAX_SUBFRAME_SAMPLES, SignalType, StereoState, StereoWeights,
 };
+use crate::slices::array_windows;
 
 /// Maximum number of output samples per 20-ms SILK frame at 48 kHz (`20 ms * 48 kHz = 960`).
 const MAX_RESAMPLED_FRAME_SAMPLES: usize = 960;
@@ -88,7 +89,7 @@ fn lpc_analysis_order<const ORDER: usize>(out: &mut [i16], input: &[i16], a_q12:
     };
     head.fill(0);
     let targets = body.iter_mut().zip(input.iter().skip(ORDER));
-    for ((out_sample, &current), history) in targets.zip(input.array_windows::<ORDER>()) {
+    for ((out_sample, &current), history) in targets.zip(array_windows::<_, ORDER>(input)) {
         let prediction_q12 = history.iter().zip(&a_rev).fold(0i32, |acc, (&sample, &tap)| {
             acc.wrapping_add(i32::from(sample) * i32::from(tap))
         });
@@ -337,10 +338,10 @@ pub(crate) fn unmix_mid_side_to_left_right(
 
     let target_q13 = (weights.w0_q13, weights.w1_q13);
     let (mut pred0_q13, mut pred1_q13) = (prev0_q13, prev1_q13);
-    for (i, (mid_window, side_out)) in mid[..frame_length + STEREO_HISTORY_SAMPLES]
-        .array_windows::<3>()
-        .zip(&mut side[1..=frame_length])
-        .enumerate()
+    for (i, (mid_window, side_out)) in
+        array_windows::<_, 3>(&mid[..frame_length + STEREO_HISTORY_SAMPLES])
+            .zip(&mut side[1..=frame_length])
+            .enumerate()
     {
         if i < interp_samples {
             pred0_q13 += delta0_q13;

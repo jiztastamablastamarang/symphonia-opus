@@ -1,8 +1,7 @@
 //! Numeric conversions with a defined result for every input.
 //!
-//! Widening conversions use `From`, and same-width bit reinterpretations use `cast_signed` and
-//! `cast_unsigned`. Every other conversion in the crate goes through this module, so no `as`
-//! cast elsewhere can silently truncate, wrap or round:
+//! Widening conversions use `From`. Every other conversion in the crate goes through this module,
+//! so no `as` cast elsewhere can silently truncate, wrap or round:
 //!
 //! ```text
 //!   conversion                 input range                  result outside the range
@@ -11,6 +10,7 @@
 //!   wrap_i16, wrap_i32         any                          two's-complement low bits (RFC 6716)
 //!   ExactF32::exact_f32        |x| <= 2^24                  debug: panic, release: nearest f32
 //!   nearest_f32                any f64                      nearest f32
+//!   reinterpret_(un)signed     any                          same bits, other signedness
 //! ```
 //!
 //! `BoundedFrom` is for values whose range follows from RFC 6716 limits (frame lengths of at most
@@ -93,6 +93,22 @@ bounded_from_unsigned! {
 pub(crate) fn nonnegative_index(value: i32) -> usize {
     debug_assert!(value >= 0, "{value} is negative");
     return value as usize;
+}
+
+/// Reinterprets the bits of `a` as unsigned, like `i32::cast_unsigned` (stable only after the
+/// Rust 1.85 MSRV): two's-complement values map one to one, so no information is lost.
+#[inline(always)]
+#[expect(clippy::cast_sign_loss, reason = "same-width bit reinterpretation")]
+pub(crate) const fn reinterpret_unsigned(a: i32) -> u32 {
+    return a as u32;
+}
+
+/// Reinterprets the bits of `a` as signed, like `u32::cast_signed` (stable only after the Rust
+/// 1.85 MSRV): two's-complement values map one to one, so no information is lost.
+#[inline(always)]
+#[expect(clippy::cast_possible_wrap, reason = "same-width bit reinterpretation")]
+pub(crate) const fn reinterpret_signed(a: u32) -> i32 {
+    return a as i32;
 }
 
 /// Keeps the low 16 bits of `a` as a two's-complement value: the `(opus_int16)` narrowing of the

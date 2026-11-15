@@ -28,13 +28,13 @@
 //!                             and Raw Bits Data
 //! ```
 
-use crate::convert::BoundedFrom;
+use crate::convert::{BoundedFrom, reinterpret_signed};
 use symphonia_core::errors::{Error, Result};
 
 /// Bits per input byte, the step of one renormalization.
 const BYTE_BITS: u32 = 8;
 /// [`BYTE_BITS`] for the signed bit counts of [`Decoder::tell`].
-const BYTE_BITS_I32: i32 = BYTE_BITS.cast_signed();
+const BYTE_BITS_I32: i32 = reinterpret_signed(BYTE_BITS);
 /// Most symbols a [`Cdf`] may have, so that a decoded symbol index always fits in a `u8`.
 const MAX_CDF_SYMBOLS: usize = 1 << u8::BITS;
 /// Bits of the first byte taken into `val` at initialization; the rest is carried over.
@@ -240,7 +240,7 @@ impl<'a> Decoder<'a> {
     /// ([RFC 6716 Section 4.1.6.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.6.1>)).
     #[inline]
     pub(crate) fn tell(&self) -> i32 {
-        return self.total_bits_read - bit_width(self.range).cast_signed();
+        return self.total_bits_read - reinterpret_signed(bit_width(self.range));
     }
 
     /// Bits used so far in 1/8 bit units (`Q3`), a finer count than [`Decoder::tell`]
@@ -260,7 +260,7 @@ impl<'a> Decoder<'a> {
 
         let remaining_range_q3 = (range_bits << FRACTIONAL_BIT_RESOLUTION) + frac_octant;
         // At most `32 * 8 + 8` (a 32-bit range plus one octant), so the conversion is exact.
-        return total_bits_q3 - remaining_range_q3.cast_signed();
+        return total_bits_q3 - reinterpret_signed(remaining_range_q3);
     }
 
     /// Decodes one symbol from `cdf` and returns its index `k`, the first symbol whose upper
@@ -353,7 +353,7 @@ impl<'a> Decoder<'a> {
         let result = self.raw_bit_window & mask;
         self.raw_bit_window >>= bits;
         self.raw_bits_available -= bits;
-        self.total_bits_read += bits.cast_signed();
+        self.total_bits_read += reinterpret_signed(bits);
 
         return Ok(result);
     }

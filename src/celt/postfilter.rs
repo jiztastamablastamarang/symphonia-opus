@@ -15,6 +15,7 @@
 use crate::celt::constant::{CELT_WINDOW, COMB_FILTER_GAINS};
 use crate::celt::rate::PostFilterParams;
 use crate::celt::{BlockSize, DECODE_BUFFER_SIZE, MIN_PITCH_PERIOD, OVERLAP, SHORT_MDCT_SIZE};
+use crate::slices::array_chunks;
 
 /// One channel of synthesis history: `DECODE_BUFFER_SIZE` past samples followed by the `OVERLAP`
 /// samples of the pending MDCT overlap-add tail
@@ -237,9 +238,9 @@ fn filter_in_place(
     // position so the lagged taps can be read while the block is written; this form compiles to
     // 8-lane SIMD (commit `759a5c3`). Callers pass `n` of 120 or `n - 120` and a cross-fade of 0
     // or 120 samples, all multiples of the 8 lanes, so no scalar tail is needed.
-    debug_assert!(xfade_len.is_multiple_of(LANES) && n.is_multiple_of(LANES));
-    let xfade_windows = CELT_WINDOW[..xfade_len].as_chunks::<LANES>().0;
-    for (chunk_step, win) in xfade_windows.iter().enumerate() {
+    debug_assert!(xfade_len % LANES == 0 && n % LANES == 0);
+    let xfade_windows = array_chunks::<_, LANES>(&CELT_WINDOW[..xfade_len]).0;
+    for (chunk_step, win) in xfade_windows.enumerate() {
         let pos = history_offset + chunk_step * LANES;
         let (past, rest) = signal_buf.split_at_mut(pos);
         let (Some(current), Some(taps0), Some(taps1)) =

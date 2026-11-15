@@ -2503,6 +2503,7 @@ pub(crate) mod plc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slices::array_windows;
 
     fn assert_valid_icdf(name: &str, icdf: &[u32], allow_trailing_zero_pdf: bool) {
         assert!(icdf.len() >= 3, "{name}: iCDF must have at least 3 elements");
@@ -2669,7 +2670,7 @@ mod tests {
         assert_eq!(Q12_COSINE_TABLE_FOR_LSF_CONVERSION[128], -4096);
 
         let table = &Q12_COSINE_TABLE_FOR_LSF_CONVERSION;
-        for (i, &[current, next]) in table.array_windows::<2>().enumerate() {
+        for (i, &[current, next]) in array_windows::<_, 2>(table).enumerate() {
             assert!(current > next, "Q12 cosine table must strictly decrease at index {i}");
         }
         for (i, (&low, &high)) in table.iter().zip(table.iter().rev()).enumerate() {

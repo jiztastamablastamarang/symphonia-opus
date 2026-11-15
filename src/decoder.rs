@@ -505,6 +505,7 @@ mod tests {
     use super::*;
     use crate::convert::{BoundedFrom, nearest_f32, trunc_saturating_i16};
     use crate::header::test_support::OpusHeadBuilder;
+    use crate::slices::array_chunks;
     use crate::test_vectors::*;
     use symphonia_core::audio::{Audio, Channels, Position};
     use symphonia_core::codecs::audio::well_known::CODEC_ID_VORBIS;
@@ -886,10 +887,8 @@ mod tests {
         assert_eq!(dec.buffer.frames(), 3 * SAMPLES_20MS);
         let plane = dec.buffer.plane(0).unwrap();
         assert!(plane.iter().all(|sample| sample.is_finite()));
-        let energies: Vec<f32> = plane
-            .as_chunks::<SAMPLES_20MS>()
+        let energies: Vec<f32> = array_chunks::<_, SAMPLES_20MS>(plane)
             .0
-            .iter()
             .map(|step| step.iter().fold(0.0_f32, |acc, &sample| acc + sample * sample))
             .collect();
         assert_eq!(energies.len(), 3);

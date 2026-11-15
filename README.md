@@ -618,7 +618,7 @@ cargo test --release --test rfc6716_conformance -- --ignored --nocapture
 | Property | `symphonia-opus` (`Rust 2024`) | `libopus 1.6.1` (`C`) |
 | :--- | :--- | :--- |
 | **Memory & Type Safety** | `#![forbid(unsafe_code)]` across the entire crate and benchmark suite | Manual pointer arithmetic, VLAs / `ALLOC` pseudo-stack, raw C FFI |
-| **Toolchain & Build** | Pure Rust (`MSRV 1.100`), zero C compiler or `-sys` build scripts | Requires C toolchain, autotools/CMake, and link-time symbol coordination |
+| **Toolchain & Build** | Pure Rust (`MSRV 1.85`), zero C compiler or `-sys` build scripts | Requires C toolchain, autotools/CMake, and link-time symbol coordination |
 | **Entropy Table Integrity** | Compile-time `const` validated `Cdf` tables (`power-of-two` total `2^k`, monotonic entries) | Unchecked `opus_uint16` arrays indexed by pointer offsets |
 | **Steady-State Allocations** | `0` heap allocations per packet (`PacketRef` -> planar `AudioBuffer<f32>`) | `0` heap allocations when compiled with `VAR_ARRAYS` / `USE_ALLOCA` |
 | **Output Layout** | Native zero-copy planar `AudioBuffer<f32>` (`decode_ref`) + optional interleaved copy | Interleaved `opus_decode_float` (`f32`) or `opus_decode` (`i16`) |

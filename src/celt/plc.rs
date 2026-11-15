@@ -10,7 +10,8 @@ use crate::celt::{
     BlockSize, DECODE_BUFFER_SIZE, MAX_CHANNELS, MAX_FRAME_SIZE, OVERLAP, PITCH_HISTORY_LEN,
     lcg_next,
 };
-use crate::convert::ExactF32;
+use crate::convert::{ExactF32, reinterpret_signed};
+use crate::slices::array_windows;
 
 /// Saturation value of the loss duration counter, in 2.5 ms units.
 const MAX_PLC_LOSS_DURATION: usize = 10_000;
@@ -301,7 +302,7 @@ pub(crate) fn fill_noise_spectrum(
             let band_slice = &mut plane[boffs..(boffs + blen)];
             for coeff in band_slice.iter_mut() {
                 seed = lcg_next(seed);
-                *coeff = (seed.cast_signed() >> 20).exact_f32();
+                *coeff = (reinterpret_signed(seed) >> 20).exact_f32();
             }
             renormalise_vector(band_slice, blen, 1.0_f32);
         }
@@ -575,10 +576,7 @@ fn decimate_low_pass(channel: &[f32]) -> impl Iterator<Item = f32> + '_ {
         [x0, x1, ..] => 0.25 * x1 + 0.5 * x0,
         _ => 0.0,
     };
-    let rest = channel
-        .get(1..)
-        .unwrap_or_default()
-        .array_windows::<3>()
+    let rest = array_windows::<_, 3>(channel.get(1..).unwrap_or_default())
         .step_by(2)
         .map(|&[before, centre, after]| 0.25 * (before + after) + 0.5 * centre);
     return std::iter::once(first).chain(rest);

@@ -39,7 +39,7 @@ use crate::celt;
 use crate::celt::BlockSize;
 use crate::celt::constant::CELT_WINDOW;
 use crate::celt::decoder::{FrameInput, FrameLayout, Mix};
-use crate::convert::BoundedFrom;
+use crate::convert::{BoundedFrom, reinterpret_signed};
 use crate::entropy;
 use crate::layout::Layout;
 use crate::packet::FramePacket;
@@ -94,7 +94,7 @@ const HYBRID_REDUNDANCY_LEN_RADIX: u32 = 256;
 const HYBRID_REDUNDANCY_MIN_BYTES: usize = 2;
 
 /// Bits per byte, in the `i32` domain of [`entropy::Decoder::tell`].
-const BITS_PER_BYTE: i32 = u8::BITS.cast_signed();
+const BITS_PER_BYTE: i32 = reinterpret_signed(u8::BITS);
 
 /// Which operand of a 5 ms cross-lap the rising CELT window favours
 /// ([RFC 6716 Section 4.5.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.1.4>)).

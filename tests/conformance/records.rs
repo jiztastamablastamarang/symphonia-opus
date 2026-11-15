@@ -57,5 +57,9 @@ pub(crate) fn read_file(path: &Path) -> Vec<u8> {
 
 /// Reads a 16-bit little-endian PCM file as written by `opus_demo`.
 pub(crate) fn read_pcm16(bytes: &[u8]) -> Vec<i16> {
-    return bytes.as_chunks::<2>().0.iter().map(|&pair| i16::from_le_bytes(pair)).collect();
+    return bytes
+        .chunks_exact(2)
+        .filter_map(|pair| pair.try_into().ok())
+        .map(i16::from_le_bytes)
+        .collect();
 }

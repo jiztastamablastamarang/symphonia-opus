@@ -8,6 +8,7 @@
 
 use crate::celt::mdct::MDCT_MAX_N4;
 use crate::convert::BoundedFrom;
+use crate::slices::array_chunks_mut;
 
 /// Single-precision complex number used in the mixed-radix quarter-length FFT.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -177,7 +178,7 @@ fn digit_reversal_recursive(
 /// Radix-4 butterfly over a span of one point (innermost stage, no twiddles).
 #[inline]
 fn butterfly_radix4_base(fout: &mut [Complex32]) {
-    for quad in fout.as_chunks_mut::<4>().0 {
+    for quad in array_chunks_mut::<_, 4>(fout) {
         let [f0, f1, f2, f3] = *quad;
 
         let scratch0 = f0.sub(f2);
@@ -247,7 +248,7 @@ fn butterfly_radix4(
 fn butterfly_radix2(fout: &mut [Complex32], fstride: usize, twiddles: &[Complex32; MDCT_MAX_N4]) {
     const SPAN: usize = 4;
     const GROUP_LEN: usize = 2 * SPAN;
-    for group in fout.as_chunks_mut::<GROUP_LEN>().0 {
+    for group in array_chunks_mut::<_, GROUP_LEN>(fout) {
         let (leg0, leg1) = group.split_at_mut(SPAN);
         for (j, (f0_slot, f1_slot)) in leg0.iter_mut().zip(leg1.iter_mut()).enumerate() {
             let tw = twiddles[j * fstride];
