@@ -82,6 +82,19 @@ bounded_from_unsigned! {
     usize => u8, u16, u32, i16, i32;
 }
 
+/// Converts a non-negative `i32` sample position or table index to `usize`, for per-sample loops
+/// where a checked conversion measured slower.
+///
+/// Debug builds assert the sign. Release builds reinterpret the bits: a negative value, which
+/// the callers rule out, becomes an index far out of range and panics at the slice access
+/// instead of silently selecting a wrong sample.
+#[inline(always)]
+#[expect(clippy::cast_sign_loss, reason = "non-negative by contract, asserted in debug builds")]
+pub(crate) fn nonnegative_index(value: i32) -> usize {
+    debug_assert!(value >= 0, "{value} is negative");
+    return value as usize;
+}
+
 /// Keeps the low 16 bits of `a` as a two's-complement value: the `(opus_int16)` narrowing of the
 /// RFC 6716 Appendix A fixed-point macros (for example the 16-bit operand of `silk_SMULWB`).
 #[inline(always)]

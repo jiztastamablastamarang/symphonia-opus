@@ -9,7 +9,7 @@
 
 use symphonia_core::errors::Result;
 
-use crate::convert::BoundedFrom;
+use crate::convert::{BoundedFrom, nonnegative_index};
 use crate::fixed::{mul_add_q16_i16, mul_q16, mul_q16_i16, round_shift, saturate_i16};
 use crate::silk::constant::resampler::{
     RESAMPLER_1_2_COEFS, RESAMPLER_2_3_COEFS, RESAMPLER_3_4_COEFS, RESAMPLER_DELAY_MATRIX_DEC,
@@ -57,7 +57,7 @@ const AR2_COEFS: usize = 2;
 pub(crate) enum DownFilter {
     /// `3:4` and `2:3` rates: an 18-tap FIR whose halves are read from one of `fractions`
     /// polyphase branches selected by the fractional sample position.
-    Interpolated { fractions: usize, coefs: &'static [i16] },
+    Interpolated { fractions: u8, coefs: &'static [i16] },
     /// `1:2`, `1:3`, `1:4` and `1:6` rates: a symmetric FIR of `order` taps folded around its
     /// centre.
     Symmetric { order: usize, coefs: &'static [i16] },
@@ -101,7 +101,7 @@ impl DownFilter {
 
         let mut written = 0usize;
         for (out_sample, index_q16) in out.iter_mut().zip(positions_q16) {
-            let window = &buf[usize::bounded_from(index_q16 >> 16)..];
+            let window = &buf[nonnegative_index(index_q16 >> 16)..];
             let res_q6 = self.tap_sum_q6(window, index_q16 & INDEX_FRAC_Q16_MASK);
             *out_sample = saturate_i16(round_shift(res_q6, DOWN_FIR_Q6_SHIFT));
             written += 1;
@@ -116,10 +116,9 @@ impl DownFilter {
         return match self {
             Self::Interpolated { fractions, .. } => {
                 const HALF_ORDER: usize = RESAMPLER_DOWN_ORDER_FIR0 / 2;
-                let phase =
-                    usize::bounded_from(mul_q16_i16(frac_q16, i16::bounded_from(fractions)));
+                let phase = nonnegative_index(mul_q16_i16(frac_q16, i16::from(fractions)));
                 let rising = &fir[HALF_ORDER * phase..HALF_ORDER * (phase + 1)];
-                let falling_start = HALF_ORDER * (fractions - 1 - phase);
+                let falling_start = HALF_ORDER * (usize::from(fractions) - 1 - phase);
                 let falling = &fir[falling_start..falling_start + HALF_ORDER];
 
                 let acc = window[..HALF_ORDER]
@@ -521,9 +520,8 @@ fn interpolate_fir_12(buf: &[i16], index_increment_q16: i32, out: &mut [i16]) ->
         if index_q16 >= max_index_q16 {
             break;
         }
-        let phase =
-            usize::bounded_from(mul_q16_i16(index_q16 & INDEX_FRAC_Q16_MASK, UP_FIR_PHASES));
-        let offset = usize::bounded_from(index_q16 >> 16);
+        let phase = nonnegative_index(mul_q16_i16(index_q16 & INDEX_FRAC_Q16_MASK, UP_FIR_PHASES));
+        let offset = nonnegative_index(index_q16 >> 16);
         let Some(window) = buf[offset..].first_chunk::<ORDER>()
         else {
             break;
