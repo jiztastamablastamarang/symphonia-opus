@@ -633,31 +633,31 @@ Measured on a single pinned core (`taskset -c 2`, Intel Xeon E5-2650 v2, Rust 1.
 
 | Build & Output Config | `symphonia-opus` Planar | `symphonia-opus` Interleaved | `libopus 1.6.1` | Planar / `libopus` Speed | Real-Time Factor |
 | :--- | ---: | ---: | ---: | :---: | ---: |
-| **Portable** `48 kHz, 2 ch` | `1103.33 ms` | `1128.20 ms` | `1022.16 ms` | **`0.93x`** | `291x RT` |
-| **Portable** `48 kHz, 1 ch` | `951.09 ms` | `958.47 ms` | `860.38 ms` | **`0.90x`** | `337x RT` |
-| **Portable** `16 kHz, 1 ch` | `892.77 ms` | `898.48 ms` | `784.20 ms` | **`0.88x`** | `359x RT` |
-| **Native SIMD** `48 kHz, 2 ch` | `1100.14 ms` | `1115.36 ms` | `1000.87 ms` | **`0.91x`** | `291x RT` |
-| **Native SIMD** `48 kHz, 1 ch` | `946.20 ms` | `955.25 ms` | `845.07 ms` | **`0.89x`** | `339x RT` |
-| **Native SIMD** `16 kHz, 1 ch` | `889.18 ms` | `892.00 ms` | `770.33 ms` | **`0.87x`** | `361x RT` |
+| **Portable** `48 kHz, 2 ch` | `1107.38 ms` | `1126.04 ms` | `1020.51 ms` | **`0.92x`** | `290x RT` |
+| **Portable** `48 kHz, 1 ch` | `948.88 ms` | `956.68 ms` | `868.65 ms` | **`0.92x`** | `338x RT` |
+| **Portable** `16 kHz, 1 ch` | `890.05 ms` | `892.25 ms` | `787.49 ms` | **`0.88x`** | `360x RT` |
+| **Native SIMD** `48 kHz, 2 ch` | `1108.42 ms` | `1126.93 ms` | `1002.13 ms` | **`0.90x`** | `289x RT` |
+| **Native SIMD** `48 kHz, 1 ch` | `952.08 ms` | `962.63 ms` | `840.45 ms` | **`0.88x`** | `337x RT` |
+| **Native SIMD** `16 kHz, 1 ch` | `898.48 ms` | `898.36 ms` | `770.77 ms` | **`0.86x`** | `357x RT` |
 
 ### 9.3 Per-Mode Breakdown (`48 kHz` Stereo, Native SIMD Build)
 
-Without a single line of `unsafe` or target-specific intrinsics, `symphonia-opus` **outperforms `libopus 1.6.1` (`1.03x` to `1.13x` faster)** on every SILK-only and Hybrid test vector (`6 of 12` official IETF vectors), and reaches `0.81x` to `0.87x` of `libopus`'s hand-tuned SSE4.1/AVX assembly on pure CELT fullband music vectors:
+Without a single line of `unsafe` or target-specific intrinsics, `symphonia-opus` **outperforms `libopus 1.6.1` (`1.02x` to `1.13x` faster)** on every SILK-only and Hybrid test vector (`6 of 12` official IETF vectors), and reaches `0.80x` to `0.87x` of `libopus`'s hand-tuned SSE4.1/AVX assembly on pure CELT fullband music vectors:
 
 | Test Vector | Coding Mode & Content | `symphonia-opus` Planar | `libopus 1.6.1` (`-march=native`) | Relative Speed (`> 1.00x` = Faster than `libopus`) |
 | :--- | :--- | ---: | ---: | :---: |
-| `testvector02` | SILK Narrowband (speech, 49% stereo) | `32.93 ms` | `36.06 ms` | **`1.10x`** |
-| `testvector03` | SILK Mediumband (speech, 48% stereo) | `33.61 ms` | `36.27 ms` | **`1.08x`** |
-| `testvector04` | SILK Wideband (speech, 49% stereo) | `47.29 ms` | `51.73 ms` | **`1.09x`** |
-| `testvector05` | Hybrid Super-Wideband (SILK + CELT) | `98.45 ms` | `102.12 ms` | **`1.04x`** |
-| `testvector06` | Hybrid Fullband (SILK + CELT) | `97.73 ms` | `100.46 ms` | **`1.03x`** |
-| `testvector12` | SILK NB..WB + 19% Hybrid SWB | `35.30 ms` | `39.89 ms` | **`1.13x`** |
-| `testvector09` | CELT NB..FB (7 bandwidth switches) | `139.80 ms` | `120.61 ms` | `0.86x` |
-| `testvector10` | CELT FB + 16% Hybrid (16 mode switches) | `172.19 ms` | `149.98 ms` | `0.87x` |
-| `testvector11` | CELT Fullband stereo (high bitrate) | `111.89 ms` | `93.54 ms` | `0.84x` |
-| `testvector01` | CELT Fullband stereo | `164.56 ms` | `133.59 ms` | `0.81x` |
-| `testvector07` | CELT NB..FB (31 bandwidth switches) | `85.25 ms` | `69.06 ms` | `0.81x` |
-| `testvector08` | CELT NB..FB (29 bandwidth switches) | `81.00 ms` | `66.83 ms` | `0.83x` |
+| `testvector02` | SILK Narrowband (speech, 49% stereo) | `33.26 ms` | `36.14 ms` | **`1.09x`** |
+| `testvector03` | SILK Mediumband (speech, 48% stereo) | `33.74 ms` | `36.16 ms` | **`1.07x`** |
+| `testvector04` | SILK Wideband (speech, 49% stereo) | `47.92 ms` | `51.63 ms` | **`1.08x`** |
+| `testvector05` | Hybrid Super-Wideband (SILK + CELT) | `98.55 ms` | `101.44 ms` | **`1.03x`** |
+| `testvector06` | Hybrid Fullband (SILK + CELT) | `97.96 ms` | `100.17 ms` | **`1.02x`** |
+| `testvector12` | SILK NB..WB + 19% Hybrid SWB | `35.01 ms` | `39.69 ms` | **`1.13x`** |
+| `testvector09` | CELT NB..FB (7 bandwidth switches) | `140.62 ms` | `121.18 ms` | `0.86x` |
+| `testvector10` | CELT FB + 16% Hybrid (16 mode switches) | `173.22 ms` | `150.24 ms` | `0.87x` |
+| `testvector11` | CELT Fullband stereo (high bitrate) | `112.95 ms` | `93.81 ms` | `0.83x` |
+| `testvector01` | CELT Fullband stereo | `164.65 ms` | `133.74 ms` | `0.81x` |
+| `testvector07` | CELT NB..FB (31 bandwidth switches) | `86.04 ms` | `68.76 ms` | `0.80x` |
+| `testvector08` | CELT NB..FB (29 bandwidth switches) | `81.87 ms` | `66.92 ms` | `0.82x` |
 
 Key safe-Rust optimizations behind these results:
 - **Zero-copy planar `AudioBuffer<f32>` decoding (`decoder.rs`, `planes.rs`)**: Single-stream and bijective Vorbis multi-stream packets decode directly into Symphonia's output planes without intermediate frame buffers or redundant `memset` passes.
