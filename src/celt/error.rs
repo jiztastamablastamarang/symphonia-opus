@@ -26,7 +26,7 @@ pub(crate) enum Error {
     BufferTooSmall,
     /// A spreading symbol outside `0..=3` (RFC 6716 Section 4.3.4.3, Table 59).
     #[error("{}", self.message())]
-    InvalidSpread(u32),
+    InvalidSpread(u8),
 }
 
 impl Error {

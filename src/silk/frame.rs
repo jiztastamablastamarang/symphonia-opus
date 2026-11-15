@@ -213,7 +213,7 @@ pub(crate) struct Frame {
     pub(crate) lpc_order: usize,
     pub(crate) subframes: [Subframe; MAX_SUBFRAMES],
     pub(crate) ltp_scale_q14: i16,
-    pub(crate) lsf_interpolation_index: Option<u32>,
+    pub(crate) lsf_interpolation_index: Option<u8>,
     pub(crate) stereo_weights: Option<StereoWeights>,
     pub(crate) mid_only: bool,
     pub(crate) lcg_seed: u8,

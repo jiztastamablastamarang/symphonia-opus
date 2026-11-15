@@ -605,7 +605,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         let qn =
             if intensity_coded { 1 } else { compute_qn(band_width, bits, offset, pulse_cap, kind) };
 
-        let tell = self.dec.tell_frac() as i32;
+        let tell = self.dec.tell_frac();
         let mut invert_side = false;
         let itheta = match (qn != 1, kind) {
             (true, _) => {
@@ -620,7 +620,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
             }
             (false, SplitKind::Partition) => 0,
         };
-        let qalloc = (self.dec.tell_frac() as i32) - tell;
+        let qalloc = self.dec.tell_frac() - tell;
         return Ok(SplitAngle::from_theta(itheta, band_width, invert_side, qalloc));
     }
 

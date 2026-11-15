@@ -201,6 +201,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod celt;
+mod convert;
 mod decoder;
 mod entropy;
 mod fixed;

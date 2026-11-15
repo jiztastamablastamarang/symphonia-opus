@@ -24,7 +24,7 @@ const LCG_INCREMENT: i32 = 907_633_515;
 
 /// Pulse count symbol meaning "17 or more pulses": one more LSB per pulse follows
 /// (RFC 6716 Section 4.2.7.8.2).
-const ESCAPE_PULSE_COUNT: u32 = 17;
+const ESCAPE_PULSE_COUNT: u8 = 17;
 
 /// Largest number of LSBs per shell block (RFC 6716 Section 4.2.7.8.2).
 const MAX_LSB_COUNT: u8 = 10;
@@ -62,7 +62,7 @@ pub(crate) fn advance_lcg_seed(seed: i32) -> i32 {
 /// Decodes the 2-bit Linear Congruential Generator (LCG) seed that follows the side
 /// information ([RFC 6716 Section 4.2.7.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.7>)).
 pub(crate) fn decode_lcg_seed(decoder: &mut entropy::Decoder<'_>, frame: &mut Frame) -> Result<()> {
-    frame.lcg_seed = decoder.decode_symbol(constant::CDF_LINEAR_CONGRUENTIAL_GENERATOR_SEED)? as u8;
+    frame.lcg_seed = decoder.decode_symbol(constant::CDF_LINEAR_CONGRUENTIAL_GENERATOR_SEED)?;
     return Ok(());
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn decode_excitation(
 
     let frame_type = frame.frame_type;
     let rate_level = decode_rate_level(decoder, frame_type.signal_type)?;
-    frame.rate_level = rate_level as u8;
+    frame.rate_level = rate_level;
 
     let Frame { pulses, pulse_counts, lsb_counts, .. } = frame;
     let pulse_counts = &mut pulse_counts[..num_blocks];
@@ -121,7 +121,7 @@ pub(crate) fn decode_excitation(
 
 /// Decodes the excitation rate level index (`0..=8`)
 /// ([RFC 6716 Section 4.2.7.8.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.8.1>)).
-fn decode_rate_level(decoder: &mut entropy::Decoder<'_>, signal_type: SignalType) -> Result<u32> {
+fn decode_rate_level(decoder: &mut entropy::Decoder<'_>, signal_type: SignalType) -> Result<u8> {
     let cdf: Cdf<'static> = match signal_type {
         SignalType::Voiced => constant::CDF_RATE_LEVEL_VOICED,
         SignalType::Unvoiced | SignalType::Inactive => constant::CDF_RATE_LEVEL_UNVOICED,
@@ -133,9 +133,9 @@ fn decode_rate_level(decoder: &mut entropy::Decoder<'_>, signal_type: SignalType
 /// ([RFC 6716 Section 4.2.7.8.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.8.2>)).
 fn decode_block_pulse_count(
     decoder: &mut entropy::Decoder<'_>,
-    rate_level: u32,
+    rate_level: u8,
 ) -> Result<(u8, u8)> {
-    let rate_row = (rate_level as usize).min(constant::CDF_PULSE_COUNT.len() - 1);
+    let rate_row = usize::from(rate_level).min(constant::CDF_PULSE_COUNT.len() - 1);
     let mut count = decoder.decode_symbol(constant::CDF_PULSE_COUNT[rate_row])?;
     let mut lsb_count = 0u8;
 
@@ -148,7 +148,7 @@ fn decode_block_pulse_count(
         count = decoder.decode_symbol(constant::CDF_PULSE_COUNT[row])?;
     }
 
-    return Ok((count as u8, lsb_count));
+    return Ok((count, lsb_count));
 }
 
 // A block carries at most 16 pulses after the escapes, every split table has a row for each
@@ -216,7 +216,7 @@ fn decode_shell_partition(
     };
     let cdf = table[usize::from(total_pulses) - 1];
 
-    let left_pulses = decoder.decode_symbol(cdf)? as u8;
+    let left_pulses = decoder.decode_symbol(cdf)?;
     let right_pulses = total_pulses - left_pulses;
 
     let (left_half, right_half) = partition.split_at_mut(len >> 1);

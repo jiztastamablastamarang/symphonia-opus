@@ -120,7 +120,7 @@ fn band_allocation_mono_lm3_matches_recorded_values() {
             *slot = 6;
         }
     }
-    let total = ((40 * 8) << BITRES) - (dec.tell_frac() as i32) - 1;
+    let total = ((40 * 8) << BITRES) - dec.tell_frac() - 1;
     let alloc = BandAllocation::compute(
         &mut dec,
         AllocationLayout { start: 0, end: 21, channels: 1, lm: BlockSize::new(3) },
@@ -171,7 +171,7 @@ fn band_allocation_stereo_lm2_matches_recorded_values() {
     let mut offsets = [0i32; MAX_BANDS];
     offsets[2] = 12;
     offsets[8] = 6;
-    let total = ((60 * 8) << BITRES) - (dec.tell_frac() as i32) - 1;
+    let total = ((60 * 8) << BITRES) - dec.tell_frac() - 1;
     let alloc = BandAllocation::compute(
         &mut dec,
         AllocationLayout { start: 0, end: 21, channels: 2, lm: BlockSize::new(2) },
@@ -216,7 +216,7 @@ fn band_allocation_hybrid_stereo_lm3_matches_recorded_values() {
 
     let cap = init_caps(BlockSize::new(3), 2);
     let offsets = [0i32; MAX_BANDS];
-    let total = ((32 * 8) << BITRES) - (dec.tell_frac() as i32) - 1;
+    let total = ((32 * 8) << BITRES) - dec.tell_frac() - 1;
     let alloc = BandAllocation::compute(
         &mut dec,
         AllocationLayout { start: 17, end: 21, channels: 2, lm: BlockSize::new(3) },
@@ -260,7 +260,7 @@ fn band_allocation_high_bitrate_matches_recorded_values() {
         *slot = 24;
     }
 
-    let total = ((160 * 8) << BITRES) - (dec.tell_frac() as i32) - 1;
+    let total = ((160 * 8) << BITRES) - dec.tell_frac() - 1;
     let alloc = BandAllocation::compute(
         &mut dec,
         AllocationLayout { start: 0, end: 21, channels: 2, lm: BlockSize::new(3) },

@@ -28,10 +28,23 @@
 //!                             and Raw Bits Data
 //! ```
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use crate::convert::BoundedFrom;
 use symphonia_core::errors::{Error, Result};
 
 /// Bits per input byte, the step of one renormalization.
 const BYTE_BITS: u32 = 8;
+/// [`BYTE_BITS`] for the signed bit counts of [`Decoder::tell`].
+const BYTE_BITS_I32: i32 = BYTE_BITS.cast_signed();
+/// Most symbols a [`Cdf`] may have, so that a decoded symbol index always fits in a `u8`.
+const MAX_CDF_SYMBOLS: usize = 1 << u8::BITS;
 /// Bits of the first byte taken into `val` at initialization; the rest is carried over.
 const INITIAL_BITS: u32 = 7;
 /// Initial `rng` (RFC 6716 Section 4.1.1).
@@ -92,9 +105,11 @@ impl<'a> Cdf<'a> {
     /// Builds a table, or returns `None` when it is not a well-formed Opus cumulative
     /// distribution: fewer than two entries, a non-power-of-two total (`2^ftb` in
     /// [RFC 6716 Section 4.1.3.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.3.3>)),
-    /// a zero initial bound, a decreasing bound, or a last bound that differs from the total.
+    /// a zero initial bound, a decreasing bound, a last bound that differs from the total, or more
+    /// than 256 symbols.
     pub(crate) const fn try_new(table: &'a [u32]) -> Option<Self> {
         if table.len() < 2
+            || table.len() - 1 > MAX_CDF_SYMBOLS
             || !table[0].is_power_of_two()
             || table[1] == 0
             || table[table.len() - 1] != table[0]
@@ -190,7 +205,8 @@ impl<'a> Decoder<'a> {
 
         let first_byte = decoder.read_next_byte();
         decoder.carry_byte = first_byte;
-        decoder.value = INITIAL_VALUE_OFFSET - ((first_byte as u32) >> (BYTE_BITS - INITIAL_BITS));
+        decoder.value =
+            INITIAL_VALUE_OFFSET - (u32::from(first_byte) >> (BYTE_BITS - INITIAL_BITS));
         decoder.normalize();
 
         return decoder;
@@ -207,7 +223,8 @@ impl<'a> Decoder<'a> {
     /// ([RFC 6716 Section 4.1.6](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.6>)).
     #[inline]
     pub(crate) fn storage_bits(&self) -> i32 {
-        return (self.data.len() as i32) * (BYTE_BITS as i32);
+        // `packet` limits a frame to 1275 bytes (RFC 6716 rule R2), far below `i32::MAX / 8`.
+        return i32::bounded_from(self.data.len()) * BYTE_BITS_I32;
     }
 
     /// Drops `bytes` from the end of the frame, so that raw bits are read from before a
@@ -231,26 +248,27 @@ impl<'a> Decoder<'a> {
     /// ([RFC 6716 Section 4.1.6.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.6.1>)).
     #[inline]
     pub(crate) fn tell(&self) -> i32 {
-        return self.total_bits_read - (bit_width(self.range) as i32);
+        return self.total_bits_read - bit_width(self.range).cast_signed();
     }
 
     /// Bits used so far in 1/8 bit units (`Q3`), a finer count than [`Decoder::tell`]
     /// ([RFC 6716 Section 4.1.6.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1.6.2>)).
     #[inline]
-    pub(crate) fn tell_frac(&self) -> u32 {
+    pub(crate) fn tell_frac(&self) -> i32 {
         const THRESHOLDS_Q15: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
         const OCTANT_MASK: u32 = 7;
 
-        let total_bits_q3 = (self.total_bits_read as u32) << FRACTIONAL_BIT_RESOLUTION;
+        let total_bits_q3 = self.total_bits_read << FRACTIONAL_BIT_RESOLUTION;
         let range_bits = bit_width(self.range);
         let normalized_range_q15 = self.range >> (range_bits - NORMALIZED_RANGE_BITS);
 
         let octant = ((normalized_range_q15 >> OCTANT_SHIFT) - FIRST_OCTANT) & OCTANT_MASK;
         let frac_octant =
-            octant + u32::from(normalized_range_q15 > THRESHOLDS_Q15[octant as usize]);
+            octant + u32::from(normalized_range_q15 > THRESHOLDS_Q15[usize::bounded_from(octant)]);
 
         let remaining_range_q3 = (range_bits << FRACTIONAL_BIT_RESOLUTION) + frac_octant;
-        return total_bits_q3 - remaining_range_q3;
+        // At most `32 * 8 + 8` (a 32-bit range plus one octant), so the conversion is exact.
+        return total_bits_q3 - remaining_range_q3.cast_signed();
     }
 
     /// Decodes one symbol from `cdf` and returns its index `k`, the first symbol whose upper
@@ -262,7 +280,7 @@ impl<'a> Decoder<'a> {
     /// `fh[k] > ft - min(val / scale + 1, ft)` is algebraically identical to
     /// `val >= scale * (ft - fh[k])` and terminates at or before the final symbol (`top_offset == 0`).
     #[inline]
-    pub(crate) fn decode_symbol(&mut self, cdf: Cdf<'_>) -> Result<u32> {
+    pub(crate) fn decode_symbol(&mut self, cdf: Cdf<'_>) -> Result<u8> {
         let total = cdf.total();
         let scale = self.range >> total.trailing_zeros();
         let bounds = cdf.bounds();
@@ -270,20 +288,21 @@ impl<'a> Decoder<'a> {
         let val = self.value;
         let mut prev_top = self.range;
 
-        for (i, &high) in bounds[..last_symbol].iter().enumerate() {
+        for (&high, i) in bounds[..last_symbol].iter().zip(0u8..) {
             let top_offset = scale * (total - high);
             if val >= top_offset {
                 self.value = val - top_offset;
                 self.range = prev_top - top_offset;
                 self.normalize();
-                return Ok(i as u32);
+                return Ok(i);
             }
             prev_top = top_offset;
         }
 
         self.range = prev_top;
         self.normalize();
-        return Ok(last_symbol as u32);
+        // `Cdf` holds at most 256 symbols, so the last index is at most 255.
+        return Ok(u8::bounded_from(last_symbol));
     }
 
     /// Decodes one symbol of a distribution of total frequency `total` whose intervals `locate`
@@ -342,7 +361,7 @@ impl<'a> Decoder<'a> {
         let result = self.raw_bit_window & mask;
         self.raw_bit_window >>= bits;
         self.raw_bits_available -= bits;
-        self.total_bits_read += bits as i32;
+        self.total_bits_read += bits.cast_signed();
 
         return Ok(result);
     }
@@ -400,23 +419,25 @@ impl<'a> Decoder<'a> {
             low = zero_freq;
 
             let remaining_freq = TOTAL_FREQ - RESERVED_TAIL_FREQ - zero_freq;
-            zero_freq = (((i64::from(remaining_freq) * (ONE_Q15 / 2 - i64::from(decay)))
-                >> TOTAL_FREQ_BITS) as u32)
-                + MIN_PROB;
+            // `decay` comes from the CELT tables and stays below `2^14`, so both products below
+            // are non-negative and their `Q15` quotients stay below `2^15`.
+            zero_freq = u32::bounded_from(
+                (i64::from(remaining_freq) * (ONE_Q15 / 2 - i64::from(decay))) >> TOTAL_FREQ_BITS,
+            ) + MIN_PROB;
 
             while zero_freq > MIN_PROB && fm >= low + 2 * zero_freq {
                 zero_freq *= 2;
                 low += zero_freq;
-                zero_freq = (((i64::from(zero_freq - 2 * MIN_PROB) * i64::from(decay))
-                    >> TOTAL_FREQ_BITS) as u32)
-                    + MIN_PROB;
+                zero_freq = u32::bounded_from(
+                    (i64::from(zero_freq - 2 * MIN_PROB) * i64::from(decay)) >> TOTAL_FREQ_BITS,
+                ) + MIN_PROB;
                 decoded_value += 1;
             }
 
             if zero_freq <= MIN_PROB {
-                let tail_steps = ((fm - low) >> 1) as i32;
-                decoded_value += tail_steps;
-                low += (2 * tail_steps as u32) * MIN_PROB;
+                let tail_steps = (fm - low) >> 1;
+                decoded_value += i32::bounded_from(tail_steps);
+                low += 2 * tail_steps * MIN_PROB;
             }
 
             let negative = fm < low + zero_freq;
@@ -455,16 +476,16 @@ impl<'a> Decoder<'a> {
     #[inline]
     fn normalize(&mut self) {
         while self.range <= MIN_RANGE_SIZE {
-            self.total_bits_read += BYTE_BITS as i32;
+            self.total_bits_read += BYTE_BITS_I32;
             self.range <<= BYTE_BITS;
 
             let next_byte = self.read_next_byte();
-            let sym = (((self.carry_byte as u32) << BYTE_BITS) | (next_byte as u32))
+            let sym = ((u32::from(self.carry_byte) << BYTE_BITS) | u32::from(next_byte))
                 >> (BYTE_BITS - INITIAL_BITS);
             self.carry_byte = next_byte;
 
             self.value =
-                ((self.value << BYTE_BITS) + (u8::MAX as u32 - (sym & 0xFF))) & MAX_RANGE_VALUE;
+                ((self.value << BYTE_BITS) + (u32::from(u8::MAX) - (sym & 0xFF))) & MAX_RANGE_VALUE;
         }
     }
 

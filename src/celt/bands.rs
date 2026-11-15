@@ -185,7 +185,7 @@ impl<'a, 'd> BandSweep<'a, 'd> {
     /// eighth bits and the band's shape budget
     /// ([RFC 6716 Section 4.3.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.3>)).
     fn begin_band(&mut self, i: usize) -> (i32, i32) {
-        let tell = self.ctx.dec.tell_frac() as i32;
+        let tell = self.ctx.dec.tell_frac();
         if i != self.frame.start {
             self.balance -= tell;
         }

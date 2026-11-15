@@ -401,7 +401,7 @@ fn decode_band_boosts_and_trim(
     let mut offsets = [0i32; MAX_BANDS];
     let mut dynalloc_logp = BOOST_INITIAL_LOGP;
     let mut total_bits_q3 = total_bits << BITRES;
-    let mut tell_q3 = range_decoder.tell_frac() as i32;
+    let mut tell_q3 = range_decoder.tell_frac();
     let c = layout.channels_i32();
 
     for band in start..end {
@@ -412,7 +412,7 @@ fn decode_band_boosts_and_trim(
 
         while tell_q3 + (dynalloc_loop_logp << BITRES) < total_bits_q3 && boost < cap[band] {
             let flag = range_decoder.decode_symbol_logp(dynalloc_loop_logp as u32)?;
-            tell_q3 = range_decoder.tell_frac() as i32;
+            tell_q3 = range_decoder.tell_frac();
             if flag == 0 {
                 break;
             }
@@ -978,7 +978,7 @@ pub(crate) fn decode_bit_allocation(
     let (offsets, alloc_trim) =
         decode_band_boosts_and_trim(range_decoder, layout, total_bits, &cap)?;
 
-    let available = (total_bits << BITRES) - (range_decoder.tell_frac() as i32) - 1;
+    let available = (total_bits << BITRES) - range_decoder.tell_frac() - 1;
     let reserve_anti_collapse = is_transient
         && layout.lm.log2() >= ANTI_COLLAPSE_MIN_LM
         && available >= (((layout.lm.log2() as i32) + 2) << BITRES);

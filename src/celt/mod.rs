@@ -205,12 +205,12 @@ pub(crate) enum Spread {
     Aggressive = 3,
 }
 
-impl TryFrom<u32> for Spread {
+impl TryFrom<u8> for Spread {
     type Error = Error;
 
     /// Converts a decoded `spread` symbol (`0..=3`, Table 59) into a [`Spread`] mode
     /// ([RFC 6716 Section 4.3.4.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.3>)).
-    fn try_from(symbol: u32) -> std::result::Result<Self, Error> {
+    fn try_from(symbol: u8) -> std::result::Result<Self, Error> {
         return match symbol {
             0 => Ok(Self::None),
             1 => Ok(Self::Light),

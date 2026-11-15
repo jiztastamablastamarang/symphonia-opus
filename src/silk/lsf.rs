@@ -64,7 +64,7 @@ const MAX_STABILIZATION_ITERATIONS: usize = 20;
 
 /// Interpolation weight that reproduces the current frame NLSFs, `1.0` in Q2
 /// (RFC 6716 Section 4.2.7.5.5).
-const NLSF_INTERPOLATION_FULL_Q2: u32 = 4;
+const NLSF_INTERPOLATION_FULL_Q2: u8 = 4;
 
 /// Fraction bits of the interpolation weight (RFC 6716 Section 4.2.7.5.5).
 const NLSF_INTERPOLATION_Q2_SHIFT: u32 = 2;
@@ -285,7 +285,7 @@ impl CodingReferences {
         decoder: &mut entropy::Decoder<'_>,
         frame: &mut Frame,
         layout: &SilkLayout,
-    ) -> Result<u32> {
+    ) -> Result<u8> {
         if layout.frame_duration != FrameDuration::Ms20 {
             frame.lsf_interpolation_index = None;
             return Ok(NLSF_INTERPOLATION_FULL_Q2);
@@ -499,7 +499,7 @@ fn interpolate_nlsf_q15(
     prev_nlsf_q15: &[i16; MAX_LPC_ORDER],
     nlsf_q15: &[i16; MAX_LPC_ORDER],
     order: usize,
-    w_q2: u32,
+    w_q2: u8,
 ) -> [i16; MAX_LPC_ORDER] {
     return std::array::from_fn(|i| {
         if i >= order {
@@ -507,7 +507,7 @@ fn interpolate_nlsf_q15(
         }
         let prev = prev_nlsf_q15[i] as i32;
         let curr = nlsf_q15[i] as i32;
-        return (prev + (((curr - prev) * (w_q2 as i32)) >> NLSF_INTERPOLATION_Q2_SHIFT)) as i16;
+        return (prev + (((curr - prev) * i32::from(w_q2)) >> NLSF_INTERPOLATION_Q2_SHIFT)) as i16;
     });
 }
 
