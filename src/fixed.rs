@@ -109,11 +109,7 @@ pub(crate) fn round_shift_i64(a: i64, shift: u32) -> i64 {
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
 pub(crate) fn saturate_i16(a: i32) -> i16 {
-    return match i16::try_from(a) {
-        Ok(narrowed) => narrowed,
-        Err(_) if a < 0 => i16::MIN,
-        Err(_) => i16::MAX,
-    };
+    return i16::bounded_from(a.clamp(i32::from(i16::MIN), i32::from(i16::MAX)));
 }
 
 /// Left shift that saturates instead of overflowing; a shift of 31 or more maps every non-zero
@@ -132,11 +128,7 @@ pub(crate) fn shl_saturating(a: i32, shift: u32) -> i32 {
         return 0;
     }
     let shifted = i64::from(a) << shift;
-    return match i32::try_from(shifted) {
-        Ok(narrowed) => narrowed,
-        Err(_) if shifted < 0 => i32::MIN,
-        Err(_) => i32::MAX,
-    };
+    return i32::bounded_from(shifted.clamp(i64::from(i32::MIN), i64::from(i32::MAX)));
 }
 
 /// Compile-time constant left shift (`SHIFT < 31`) that saturates at the 32-bit signed bounds
