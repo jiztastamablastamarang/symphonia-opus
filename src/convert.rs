@@ -107,13 +107,11 @@ pub(crate) const fn wrap_i32(a: i64) -> i32 {
 }
 
 /// Largest magnitude every integer up to which `f32` represents exactly (`2^24`).
-#[cfg_attr(not(test), expect(dead_code, reason = "first used by a later module conversion"))]
 const F32_EXACT_LIMIT: u32 = 1 << f32::MANTISSA_DIGITS;
 
 /// Conversion of an integer that `f32` represents exactly (magnitude at most `2^24`).
 ///
 /// Debug builds assert the bound; release builds round to the nearest `f32` beyond it.
-#[cfg_attr(not(test), expect(dead_code, reason = "first used by a later module conversion"))]
 pub(crate) trait ExactF32: Copy {
     fn exact_f32(self) -> f32;
 }
@@ -149,7 +147,6 @@ impl ExactF32 for usize {
 }
 
 /// Rounds an `f64` to the nearest `f32`, the precision every CELT table and filter runs at.
-#[cfg_attr(not(test), expect(dead_code, reason = "first used by a later module conversion"))]
 #[inline(always)]
 #[expect(clippy::cast_possible_truncation, reason = "rounding to f32 precision is the intent")]
 pub(crate) const fn nearest_f32(x: f64) -> f32 {

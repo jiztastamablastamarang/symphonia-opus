@@ -1,6 +1,14 @@
 //! CELT packet loss concealment helpers: LPC analysis, FIR/IIR filtering, and pitch search
 //! ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use std::ops::Range;
 
 use crate::celt::constant::{CELT_WINDOW, EBANDS, band_width};
@@ -10,6 +18,7 @@ use crate::celt::{
     BlockSize, DECODE_BUFFER_SIZE, MAX_CHANNELS, MAX_FRAME_SIZE, OVERLAP, PITCH_HISTORY_LEN,
     lcg_next,
 };
+use crate::convert::ExactF32;
 
 /// Saturation value of the loss duration counter, in 2.5 ms units.
 const MAX_PLC_LOSS_DURATION: usize = 10_000;
@@ -172,7 +181,7 @@ fn estimate_lpc(lpc: &mut [f32; LPC_ORDER], exc: &[f32]) {
     autocorrelation(&exc[..PITCH_HISTORY_LEN], &mut ac, Some(&CELT_WINDOW));
     ac[0] *= LPC_NOISE_FLOOR;
     for (i, ac_val) in ac.iter_mut().enumerate().skip(1).take(LPC_ORDER) {
-        let i_f = i as f32;
+        let i_f = i.exact_f32();
         *ac_val -= *ac_val * (LPC_LAG_WINDOW * LPC_LAG_WINDOW) * i_f * i_f;
     }
     levinson_durbin(lpc, &ac);
@@ -224,20 +233,22 @@ fn extrapolate_excitation(
     decay: f32,
     n: usize,
 ) -> f32 {
-    let extrapolation_offset = PITCH_HISTORY_LEN - pitch_index;
-    let mut s1 = 0.0_f32;
-    let mut j = 0usize;
+    debug_assert!(pitch_index >= PLC_PITCH_LAG_MIN, "pitch period {pitch_index}");
+    // The last pitch period of the excitation, and of the history one frame earlier; every read
+    // precedes the concealed region, so the history splits off before it.
+    let pitch_exc = &exc_only[PITCH_HISTORY_LEN - pitch_index..PITCH_HISTORY_LEN];
+    let (history, concealed) = channel.split_at_mut(DECODE_BUFFER_SIZE - n);
+    let pitch_prev = &history[history.len() - pitch_index..];
 
-    for i in 0..(n + OVERLAP) {
-        if j >= pitch_index {
-            j -= pitch_index;
+    let mut s1 = 0.0_f32;
+    for (k, period) in concealed[..n + OVERLAP].chunks_mut(pitch_index.max(1)).enumerate() {
+        if k > 0 {
             attenuation *= decay;
         }
-        channel[DECODE_BUFFER_SIZE - n + i] = attenuation * exc_only[extrapolation_offset + j];
-        let prev_sample =
-            channel[DECODE_BUFFER_SIZE - PITCH_HISTORY_LEN - n + extrapolation_offset + j];
-        s1 += prev_sample * prev_sample;
-        j += 1;
+        for ((sample, &exc), &prev_sample) in period.iter_mut().zip(pitch_exc).zip(pitch_prev) {
+            *sample = attenuation * exc;
+            s1 += prev_sample * prev_sample;
+        }
     }
     return s1;
 }
@@ -274,7 +285,7 @@ fn synthesize_extrapolation(
         let tmp_g = 1.0_f32 - w * (1.0_f32 - ratio);
         *sample *= tmp_g;
     }
-    for sample in extrap_slice[OVERLAP..extrapolation_len].iter_mut() {
+    for sample in &mut extrap_slice[OVERLAP..extrapolation_len] {
         *sample *= ratio;
     }
     return;
@@ -298,7 +309,7 @@ pub(crate) fn fill_noise_spectrum(
             let band_slice = &mut plane[boffs..(boffs + blen)];
             for coeff in band_slice.iter_mut() {
                 seed = lcg_next(seed);
-                *coeff = ((seed as i32) >> 20) as f32;
+                *coeff = (seed.cast_signed() >> 20).exact_f32();
             }
             renormalise_vector(band_slice, blen, 1.0_f32);
         }
@@ -329,13 +340,17 @@ pub(crate) fn autocorrelation(x: &[f32], ac: &mut [f32], window: Option<&[f32]>)
         Some(win) => {
             let overlap = win.len();
             debug_assert!(n <= DECODE_BUFFER_SIZE);
-            debug_assert!(overlap <= n);
-            xx[..n].copy_from_slice(x);
-            for i in 0..overlap {
-                xx[i] *= win[i];
-                xx[n - overlap + i] *= win[overlap - 1 - i];
+            // Disjoint tapers, so the order of the two products per sample cannot matter.
+            debug_assert!(2 * overlap <= n);
+            let tapered = &mut xx[..n];
+            tapered.copy_from_slice(x);
+            for (sample, &w) in tapered.iter_mut().zip(win) {
+                *sample *= w;
             }
-            &xx[..n]
+            for (sample, &w) in tapered[n - overlap..].iter_mut().zip(win.iter().rev()) {
+                *sample *= w;
+            }
+            tapered
         }
         None => x,
     };
@@ -360,21 +375,28 @@ pub(crate) fn levinson_durbin(lpc: &mut [f32], ac: &[f32]) {
     }
 
     let mut error = ac[0];
+    // Indexing (A): step `i` extends the predictor `lpc[..i]` to order `i + 1`.
     for i in 0..p {
-        let mut rr = 0.0f32;
-        for j in 0..i {
-            rr += lpc[j] * ac[i - j];
-        }
-        rr += ac[i + 1];
+        let rr = lpc[..i]
+            .iter()
+            .zip(ac[1..=i].iter().rev())
+            .fold(0.0_f32, |acc, (&coeff, &lag_ac)| acc + coeff * lag_ac)
+            + ac[i + 1];
         let r = -rr / error;
         lpc[i] = r;
 
-        let half = (i + 1) >> 1;
-        for j in 0..half {
-            let tmp1 = lpc[j];
-            let tmp2 = lpc[i - 1 - j];
-            lpc[j] = tmp1 + r * tmp2;
-            lpc[i - 1 - j] = tmp2 + r * tmp1;
+        // Coefficient `j` and its mirror `i - 1 - j` update from each other; an odd middle
+        // coefficient mirrors itself.
+        let half = i / 2;
+        let (low, rest) = lpc[..i].split_at_mut(half);
+        let (middle, high) = rest.split_at_mut(rest.len() - half);
+        for (low_coeff, high_coeff) in low.iter_mut().zip(high.iter_mut().rev()) {
+            let (tmp1, tmp2) = (*low_coeff, *high_coeff);
+            *low_coeff = tmp1 + r * tmp2;
+            *high_coeff = tmp2 + r * tmp1;
+        }
+        for coeff in middle {
+            *coeff += r * *coeff;
         }
 
         error -= r * r * error;
@@ -460,16 +482,13 @@ pub(crate) fn decimate_and_whiten_history(x: &[&[f32]], x_lp: &mut [f32]) {
     let half_len = x_lp.len();
     debug_assert!(!x.is_empty() && x[0].len() >= 2 * half_len);
 
-    x_lp[0] = 0.25 * x[0][1] + 0.5 * x[0][0];
-    for i in 1..half_len {
-        x_lp[i] = 0.25 * (x[0][2 * i - 1] + x[0][2 * i + 1]) + 0.5 * x[0][2 * i];
+    for (sample, value) in x_lp.iter_mut().zip(decimate_low_pass(x[0])) {
+        *sample = value;
     }
-
-    if x.len() >= 2 {
-        debug_assert!(x[1].len() >= 2 * half_len);
-        x_lp[0] += 0.25 * x[1][1] + 0.5 * x[1][0];
-        for i in 1..half_len {
-            x_lp[i] += 0.25 * (x[1][2 * i - 1] + x[1][2 * i + 1]) + 0.5 * x[1][2 * i];
+    if let Some(&second) = x.get(1) {
+        debug_assert!(second.len() >= 2 * half_len);
+        for (sample, value) in x_lp.iter_mut().zip(decimate_low_pass(second)) {
+            *sample += value;
         }
     }
 
@@ -479,7 +498,7 @@ pub(crate) fn decimate_and_whiten_history(x: &[&[f32]], x_lp: &mut [f32]) {
     // Lag windowing and bandwidth expansion (`lpc_bw = 0.9^k` and `0.8` first-difference blend)
     ac[0] *= LPC_NOISE_FLOOR;
     for (i, ac_slot) in ac.iter_mut().enumerate().skip(1) {
-        let frac = LPC_LAG_WINDOW * (i as f32);
+        let frac = LPC_LAG_WINDOW * i.exact_f32();
         *ac_slot -= *ac_slot * frac * frac;
     }
 
@@ -557,6 +576,22 @@ fn find_top2_pitch_candidates(
     return best_pitch;
 }
 
+/// The 3-tap low-pass of `channel` at every even sample `2i`,
+/// `0.25 * (x[2i - 1] + x[2i + 1]) + 0.5 * x[2i]`, with the sample before the first taken as zero.
+fn decimate_low_pass(channel: &[f32]) -> impl Iterator<Item = f32> + '_ {
+    let first = match channel {
+        [x0, x1, ..] => 0.25 * x1 + 0.5 * x0,
+        _ => 0.0,
+    };
+    let rest = channel
+        .get(1..)
+        .unwrap_or_default()
+        .array_windows::<3>()
+        .step_by(2)
+        .map(|&[before, centre, after]| 0.25 * (before + after) + 0.5 * centre);
+    return std::iter::once(first).chain(rest);
+}
+
 /// Finds the lag in `0..max_pitch` (in 2x-decimated samples) at which the `x_lp.len()` most
 /// recent decimated samples `x_lp` best correlate with the earlier history `y`, by a coarse
 /// search over a further 2x decimation refined around the two best candidates, with a
@@ -567,7 +602,7 @@ pub(crate) fn correlate_pitch_lag(x_lp: &[f32], y: &[f32], max_pitch: usize) -> 
     let candidates = coarse_pitch_candidates(x_lp, y, max_pitch);
     let xcorr = refine_pitch_correlation(x_lp, y, candidates, half_max_pitch);
     let best = find_top2_pitch_candidates(&xcorr, y, x_lp.len(), half_max_pitch)[0];
-    return ((2 * best) as isize - parabolic_offset(&xcorr, best, half_max_pitch)) as usize;
+    return parabolic_lag(&xcorr, best, half_max_pitch);
 }
 
 /// Correlates `x_lp` and `y` decimated by two once more over the lags `0..max_pitch / 4` and
@@ -606,30 +641,32 @@ fn refine_pitch_correlation(
     for candidate in candidates {
         let lower = candidate.saturating_sub(PITCH_REFINE_RADIUS);
         let upper = (candidate + PITCH_REFINE_RADIUS).min(half_max_pitch.saturating_sub(1));
-        for i in lower..=upper {
-            if xcorr[i] == 0.0 {
-                xcorr[i] = correlation(x_lp, &y[i..i + x_lp.len()]).max(-1.0);
+        let windows = y[lower..].windows(x_lp.len());
+        for (slot, window) in xcorr[lower..=upper].iter_mut().zip(windows) {
+            if *slot == 0.0 {
+                *slot = correlation(x_lp, window).max(-1.0);
             }
         }
     }
     return xcorr;
 }
 
-/// One-sample correction of the pitch lag `best` towards the clearly larger of its two
-/// neighbouring correlations (`0` at the ends of the search range)
+/// The 48 kHz lag `2 * best` of the 2x-decimated lag `best`, moved one sample towards the clearly
+/// larger of its two neighbouring correlations (unchanged at the ends of the search range)
 /// ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
-fn parabolic_offset(xcorr: &[f32], best: usize, half_max_pitch: usize) -> isize {
+fn parabolic_lag(xcorr: &[f32], best: usize, half_max_pitch: usize) -> usize {
+    let lag = 2 * best;
     if best == 0 || best + 1 >= half_max_pitch {
-        return 0;
+        return lag;
     }
     let (a, b, c) = (xcorr[best - 1], xcorr[best], xcorr[best + 1]);
     return match (
         (c - a) > PITCH_OFFSET_THRESHOLD * (b - a),
         (a - c) > PITCH_OFFSET_THRESHOLD * (b - c),
     ) {
-        (true, _) => 1,
-        (false, true) => -1,
-        (false, false) => 0,
+        (true, _) => lag - 1,
+        (false, true) => lag + 1,
+        (false, false) => lag,
     };
 }
 
@@ -789,7 +826,8 @@ mod tests {
     fn lpc_fir_iir_and_pitch_period_regression_pin() {
         let mut sig = [0.0f32; 512];
         for (i, slot) in sig.iter_mut().enumerate() {
-            *slot = (i as f32 * 0.14).sin() * 100.0 + 0.5 * (i as f32 * 0.31).cos() * 60.0;
+            let t = i.exact_f32();
+            *slot = (t * 0.14).sin() * 100.0 + 0.5 * (t * 0.31).cos() * 60.0;
         }
 
         let mut ac = [0.0f32; LPC_ORDER + 1];
@@ -815,7 +853,7 @@ mod tests {
         let mut decode_mem0 = [0.0f32; DECODE_BUFFER_SIZE];
         let mut decode_mem1 = [0.0f32; DECODE_BUFFER_SIZE];
         for i in 0..DECODE_BUFFER_SIZE {
-            let phase = 2.0 * std::f32::consts::PI * (i as f32) / 200.0;
+            let phase = 2.0 * std::f32::consts::PI * i.exact_f32() / 200.0;
             decode_mem0[i] = phase.sin() * 500.0 + 0.3 * (2.0 * phase).sin() * 500.0;
             decode_mem1[i] = decode_mem0[i] * 0.8;
         }
@@ -829,7 +867,7 @@ mod tests {
 
         // Verify unique fundamental pitch period (400 samples, since 2 * 400 = 800 > 720)
         for i in 0..DECODE_BUFFER_SIZE {
-            let phase = 2.0 * std::f32::consts::PI * (i as f32) / 400.0;
+            let phase = 2.0 * std::f32::consts::PI * i.exact_f32() / 400.0;
             decode_mem0[i] = (phase.sin()
                 + 0.7 * (2.0 * phase).cos()
                 + 0.5 * (3.0 * phase).sin()

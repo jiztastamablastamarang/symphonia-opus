@@ -17,6 +17,14 @@
 //!                          +---------------------+      +-------------------+
 //! ```
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use crate::celt::constant::{BITRES, EBANDS, MAX_BANDS, Spread, band_width};
 use crate::celt::energy::BandEnergyHistory;
 use crate::celt::rate::{BandAllocation, CacheLevel};
@@ -25,6 +33,7 @@ use crate::celt::vq::{
     MAX_BAND_BITS_Q3, MAX_BAND_WIDTH, MAX_NORM_BUFFER_SIZE, Partition, exp2, renormalise_vector,
 };
 use crate::celt::{BlockSize, MAX_CHANNELS, MAX_LM, lcg_next};
+use crate::convert::{BoundedFrom, ExactF32};
 use crate::entropy::Decoder;
 use crate::planes::Planes;
 use std::f32::consts::SQRT_2;
@@ -196,7 +205,8 @@ impl<'a, 'd> BandSweep<'a, 'd> {
         if i >= self.alloc.coded_bands {
             return (tell, 0);
         }
-        let divisor = BALANCE_SHARE_BANDS.min((self.alloc.coded_bands - i) as i32);
+        // At most 21 bands.
+        let divisor = BALANCE_SHARE_BANDS.min(i32::bounded_from(self.alloc.coded_bands - i));
         let curr_balance = self.balance / divisor;
         let bits = 0.max(
             MAX_BAND_BITS_Q3.min((remaining_bits + 1).min(self.alloc.pulses[i] + curr_balance)),
@@ -248,15 +258,12 @@ impl<'a, 'd> BandSweep<'a, 'd> {
             .find(|&j| j + 1 >= i || m * EBANDS[j + 1] >= fold_bin + n)
             .unwrap_or(i - 1)
             + 1;
-        let (x_mask, y_mask) = (fold_start..fold_end).fold((0u32, 0u32), |(x_mask, y_mask), j| {
-            let Some(band_masks) = collapse_masks.get((j * channels)..((j + 1) * channels))
-            else {
-                return (x_mask, y_mask);
-            };
-            let x = u32::from(band_masks[0]);
-            let y = u32::from(band_masks[channels - 1]);
-            return (x_mask | x, y_mask | y);
-        });
+        let (x_mask, y_mask) = collapse_masks
+            .chunks_exact(channels)
+            .take(fold_end)
+            .skip(fold_start)
+            .map(channel_masks)
+            .fold((0u32, 0u32), |(x_mask, y_mask), (x, y)| (x_mask | x, y_mask | y));
         return FoldSource { lowband: Some(offset), x_mask, y_mask };
     }
 
@@ -307,7 +314,7 @@ impl<'a, 'd> BandSweep<'a, 'd> {
     /// as a folding source ([RFC 6716 Section 4.3.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.3>)).
     fn end_band(&mut self, i: usize, tell: i32, bits: i32, n: usize) {
         self.balance += self.alloc.pulses[i] + tell;
-        self.update_lowband = bits > ((n as i32) << BITRES);
+        self.update_lowband = bits > (i32::bounded_from(n) << BITRES);
         return;
     }
 }
@@ -350,9 +357,9 @@ pub(crate) fn unquantize_bands(
         let band = spectra.range(band_start..(band_start + n));
         let (x_cm, y_cm) = sweep.decode_band_shapes(band, lowbands, (n, bits), &fold)?;
 
-        if let Some(band_masks) = collapse_masks.get_mut((i * channels)..((i + 1) * channels)) {
-            band_masks[0] = x_cm as u8;
-            band_masks[channels - 1] = y_cm as u8;
+        debug_assert!(collapse_masks.len() >= end * channels);
+        if let Some(band_masks) = collapse_masks.chunks_exact_mut(channels).nth(i) {
+            set_channel_masks(band_masks, x_cm, y_cm);
         }
         sweep.end_band(i, tell, bits, n);
     }
@@ -404,23 +411,18 @@ pub(crate) fn anti_collapse(
     let blocks = lm.blocks();
     let size = lm.frame_samples();
 
-    for i in start..end {
-        let Some(band_masks) = collapse_masks.get((i * channels)..((i + 1) * channels))
-        else {
-            break;
-        };
+    debug_assert!(collapse_masks.len() >= end * channels && x.len() >= channels * size);
+    let band_masks = collapse_masks.chunks_exact(channels).skip(start);
+    for (i, band_masks) in (start..end).zip(band_masks) {
         let n0 = EBANDS[i + 1] - EBANDS[i];
-        let depth = ((1 + pulses[i]) / (n0 as i32)) >> lm.log2();
-        let thresh = 0.5_f32 * exp2(-COLLAPSE_DEPTH_DECAY * (depth as f32));
-        let sqrt_1 = 1.0_f32 / (lm.scale(n0) as f32).sqrt();
+        // A band of at most 22 bins at the 2.5 ms resolution.
+        let depth = ((1 + pulses[i]) / i32::bounded_from(n0)) >> lm.log2();
+        let thresh = 0.5_f32 * exp2(-COLLAPSE_DEPTH_DECAY * depth.exact_f32());
+        let sqrt_1 = 1.0_f32 / lm.scale(n0).exact_f32().sqrt();
         let band_start = lm.scale(EBANDS[i]);
         let band_len = lm.scale(n0);
 
-        for (c, &mask) in band_masks.iter().enumerate() {
-            let Some(plane) = x.get_mut((c * size)..((c + 1) * size))
-            else {
-                break;
-            };
+        for (c, (&mask, plane)) in band_masks.iter().zip(x.chunks_exact_mut(size)).enumerate() {
             let r = collapse_noise_level(energy, channels, c, i, lm, thresh, sqrt_1);
             let band_slice = &mut plane[band_start..(band_start + band_len)];
 
@@ -436,6 +438,27 @@ pub(crate) fn anti_collapse(
                 renormalise_vector(band_slice, band_len, 1.0_f32);
             }
         }
+    }
+    return;
+}
+
+/// Collapse masks of the first and last channel of one band's `channels` masks (the same mask
+/// for mono).
+fn channel_masks(band_masks: &[u8]) -> (u32, u32) {
+    return match (band_masks.first(), band_masks.last()) {
+        (Some(&x), Some(&y)) => (u32::from(x), u32::from(y)),
+        _ => (0, 0),
+    };
+}
+
+/// Stores the collapse masks of the first and last channel of one band; for mono the last
+/// write wins, as in the reference decoder, which also narrows each mask with an 8-bit cast.
+fn set_channel_masks(band_masks: &mut [u8], x_cm: u32, y_cm: u32) {
+    if let Some(first) = band_masks.first_mut() {
+        *first = u8::bounded_from(x_cm & u32::from(u8::MAX));
+    }
+    if let Some(last) = band_masks.last_mut() {
+        *last = u8::bounded_from(y_cm & u32::from(u8::MAX));
     }
     return;
 }
@@ -779,7 +802,7 @@ mod tests {
                 &mut seed,
             )
             .expect("intensity band decodes");
-            return (x, y, dec.tell_frac(), dec.final_range());
+            (x, y, dec.tell_frac(), dec.final_range())
         };
 
         let (x_inv, y_inv, tell_inv, rng_inv) = decode(true);

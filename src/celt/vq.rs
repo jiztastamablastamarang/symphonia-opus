@@ -15,6 +15,14 @@
 //! ([Section 4.3.4.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.5>)) and
 //! refill the blocks that collapsed ([Section 4.3.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.5>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use crate::celt::constant::{
     BIT_DEINTERLEAVE_TABLE, BIT_INTERLEAVE_TABLE, BITRES, EBANDS, EXP2_TABLE8,
     HADAMARD_SEQUENCY_ROWS, LOGN, MAX_BANDS, QTHETA_OFFSET, QTHETA_OFFSET_TWOPHASE, SPREAD_FACTOR,
@@ -26,7 +34,9 @@ use crate::celt::lcg_next;
 use crate::celt::rate::{
     CacheLevel, bits2pulses_at_level, get_pulses, max_cache_bits, pulses2bits_at_level,
 };
+use crate::convert::{BoundedFrom, ExactF32, nearest_f32, wrap_i16};
 use crate::entropy::Decoder;
+use crate::fixed::mul_low_i16;
 use crate::planes::Planes;
 use std::cell::Cell;
 use std::f32::consts::FRAC_1_SQRT_2;
@@ -103,29 +113,27 @@ pub(super) const COLLAPSE_DEPTH_DECAY: f32 = 0.125;
 /// Evaluates `cos(pi / 2 * x)` in `f64` and rounds once to `f32`.
 #[inline]
 fn cos_quarter_turn(x: f32) -> f32 {
-    return (std::f64::consts::FRAC_PI_2 * f64::from(x)).cos() as f32;
+    return nearest_f32((std::f64::consts::FRAC_PI_2 * f64::from(x)).cos());
 }
 
 /// Evaluates `2^x = e^(x ln 2)` in `f64` and rounds once to `f32`.
 #[inline]
 pub(super) fn exp2(x: f32) -> f32 {
-    return (std::f64::consts::LN_2 * f64::from(x)).exp() as f32;
+    return nearest_f32((std::f64::consts::LN_2 * f64::from(x)).exp());
 }
 
 /// Fixed-point Q15 fractional multiplication `((16384 + (a as i16 as i32) * (b as i16 as i32)) >> 15)`
 /// used by the bit-exact split-angle trigonometry ([RFC 6716 Section 4.3.4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.4>)).
 #[inline]
-const fn q15_mul_round(a: i32, b: i32) -> i32 {
-    let a16 = (a as i16) as i32;
-    let b16 = (b as i16) as i32;
-    return (16384 + a16 * b16) >> 15;
+fn q15_mul_round(a: i32, b: i32) -> i32 {
+    return (16384 + mul_low_i16(a, b)) >> 15;
 }
 
 /// Returns the 1-based position of the highest set bit of `val`, or `0` if `val == 0`: the
 /// integer base-2 logarithm of the range coder ([RFC 6716 Section 4.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.1>)).
 #[inline]
-const fn bit_length(val: u32) -> i32 {
-    return (32 - val.leading_zeros()) as i32;
+fn bit_length(val: u32) -> i32 {
+    return i32::bounded_from(u32::BITS - val.leading_zeros());
 }
 
 /// Bit-exact Q15 cosine approximation on `x` in `0..=16384` for the split angle
@@ -133,19 +141,21 @@ const fn bit_length(val: u32) -> i32 {
 ///
 /// Bit-exactness of this polynomial is required because the resulting `imid` and `iside` values
 /// feed into [`bitexact_log2tan`] to determine the mid/side bit allocation split `delta`.
-pub(crate) const fn bitexact_cos(x: i16) -> i16 {
-    let x32 = x as i32;
+pub(crate) fn bitexact_cos(x: i16) -> i16 {
+    let x32 = i32::from(x);
     let tmp = (4096 + x32 * x32) >> 13;
     let x2 = (Q15_ONE - tmp)
         + q15_mul_round(tmp, -7651 + q15_mul_round(tmp, 8277 + q15_mul_round(-626, tmp)));
-    return (1 + x2) as i16;
+    // The reference decoder returns `1 + x2` as an `opus_int16`.
+    return wrap_i16(1 + x2);
 }
 
 /// Bit-exact base-2 log-tangent approximation `log2(isin / icos)` in Q11
 /// for the split-angle bit allocation ([RFC 6716 Section 4.3.4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.4>)).
-pub(crate) const fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
-    let lc = bit_length(icos as u32);
-    let ls = bit_length(isin as u32);
+pub(crate) fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
+    // `EC_ILOG` of the signed inputs read as unsigned, as in the reference decoder.
+    let lc = bit_length(icos.cast_unsigned());
+    let ls = bit_length(isin.cast_unsigned());
     let icos_norm = icos << (15 - lc);
     let isin_norm = isin << (15 - ls);
     return (ls - lc) * (1 << 11)
@@ -225,7 +235,7 @@ impl SpreadingRotation {
         }
         debug_assert!(blocks.is_power_of_two());
         let factor = SPREAD_FACTOR[(spread as usize) - 1];
-        let gain = (len as f32) / ((len + factor * pulses) as f32);
+        let gain = len.exact_f32() / (len + factor * pulses).exact_f32();
         let theta = 0.5_f32 * gain * gain;
         let c = cos_quarter_turn(theta);
         let s = cos_quarter_turn(1.0_f32 - theta);
@@ -261,10 +271,7 @@ fn spreading_rotation(x: &mut [f32], blocks: usize, pulses: usize, spread: Sprea
         rotate_block(x);
         return;
     }
-    for block in 0..blocks {
-        let start = block * sub_len;
-        rotate_block(&mut x[start..start + sub_len]);
-    }
+    x.chunks_exact_mut(sub_len).for_each(rotate_block);
     return;
 }
 
@@ -273,7 +280,7 @@ fn spreading_rotation(x: &mut [f32], blocks: usize, pulses: usize, spread: Sprea
 fn normalise_residual(iy: &[i32], x: &mut [f32], ryy: f32, gain: f32) {
     let scale = gain / ryy.sqrt();
     for (dst, &pulse) in x.iter_mut().zip(iy.iter()) {
-        *dst = (pulse as f32) * scale;
+        *dst = pulse.exact_f32() * scale;
     }
     return;
 }
@@ -288,14 +295,12 @@ fn collapse_mask(iy: &[i32], blocks: usize) -> u32 {
     debug_assert!(blocks.is_power_of_two());
     let block_len = iy.len() >> blocks.trailing_zeros();
     debug_assert_eq!(iy.len(), block_len * blocks);
-    let mut mask = 0u32;
-    for block in 0..blocks {
-        let start = block * block_len;
-        if iy[start..start + block_len].iter().any(|&p| p != 0) {
-            mask |= 1u32 << block;
-        }
-    }
-    return mask;
+    // An empty vector has no pulses; `max(1)` only keeps the chunk size valid.
+    return iy
+        .chunks_exact(block_len.max(1))
+        .zip(0..)
+        .filter(|(block, _)| block.iter().any(|&p| p != 0))
+        .fold(0u32, |mask, (_, k)| mask | (1u32 << k));
 }
 
 /// Unquantizes the algebraic PVQ partition `x` with `pulses` pulses and `blocks` time sub-blocks
@@ -405,9 +410,12 @@ fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, order: Hadamar
     let total = n0 * stride;
     let mut tmp = [0.0_f32; MAX_BAND_WIDTH];
     for i in 0..stride {
-        let row = order.row(i, stride);
         let column = x[i..total].iter().step_by(stride);
-        tmp[(row * n0)..((row + 1) * n0)].iter_mut().zip(column).for_each(|(dst, &src)| *dst = src);
+        let Some(dst_row) = tmp[..total].chunks_exact_mut(n0.max(1)).nth(order.row(i, stride))
+        else {
+            continue;
+        };
+        dst_row.iter_mut().zip(column).for_each(|(dst, &src)| *dst = src);
     }
     x[..total].copy_from_slice(&tmp[..total]);
     return;
@@ -419,9 +427,12 @@ fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, order: HadamardO
     let total = n0 * stride;
     let mut tmp = [0.0_f32; MAX_BAND_WIDTH];
     for i in 0..stride {
-        let row = order.row(i, stride);
         let column = tmp[i..total].iter_mut().step_by(stride);
-        column.zip(x[(row * n0)..((row + 1) * n0)].iter()).for_each(|(dst, &src)| *dst = src);
+        let Some(src_row) = x[..total].chunks_exact(n0.max(1)).nth(order.row(i, stride))
+        else {
+            continue;
+        };
+        column.zip(src_row).for_each(|(dst, &src)| *dst = src);
     }
     x[..total].copy_from_slice(&tmp[..total]);
     return;
@@ -441,7 +452,8 @@ pub(super) enum SplitKind {
 /// for the split angle `theta` of a vector of `n` bins with `bits` eighth bits
 /// ([RFC 6716 Section 4.3.4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.4>)).
 fn compute_qn(n: usize, bits: i32, offset: i32, pulse_cap: i32, kind: SplitKind) -> i32 {
-    let mut n2 = 2 * (n as i32) - 1;
+    // A band holds at most 176 bins.
+    let mut n2 = 2 * i32::bounded_from(n) - 1;
     if kind == SplitKind::Stereo && n == 2 {
         n2 -= 1;
     }
@@ -453,7 +465,7 @@ fn compute_qn(n: usize, bits: i32, offset: i32, pulse_cap: i32, kind: SplitKind)
     if qb < HALF_BIT_Q3 {
         return 1;
     }
-    let raw = EXP2_TABLE8[(qb & 0x7) as usize] >> (14 - (qb >> BITRES));
+    let raw = EXP2_TABLE8[usize::bounded_from(qb & 0x7)] >> (14 - (qb >> BITRES));
     return ((raw + 1) >> 1) << 1;
 }
 
@@ -483,10 +495,11 @@ impl SplitAngle {
             0 => (Q15_ONE, 0, -THETA_MAX_Q14),
             THETA_MAX_Q14 => (0, Q15_ONE, THETA_MAX_Q14),
             _ => {
-                let im = i32::from(bitexact_cos(itheta as i16));
-                let is = i32::from(bitexact_cos((THETA_MAX_Q14 - itheta) as i16));
+                // `itheta` lies in `1..16384` here.
+                let im = i32::from(bitexact_cos(i16::bounded_from(itheta)));
+                let is = i32::from(bitexact_cos(i16::bounded_from(THETA_MAX_Q14 - itheta)));
                 // `(n - 1)` in Q7 times the Q11 log-tangent gives the Q3 differential.
-                let dl = q15_mul_round(((n as i32) - 1) << 7, bitexact_log2tan(is, im));
+                let dl = q15_mul_round((i32::bounded_from(n) - 1) << 7, bitexact_log2tan(is, im));
                 (im, is, dl)
             }
         };
@@ -496,7 +509,7 @@ impl SplitAngle {
     /// Linear mid and side gains `(cos theta, sin theta)` as `f32`.
     #[inline]
     pub(super) fn gains(&self) -> (f32, f32) {
-        return ((self.imid as f32) * Q15_SCALE, (self.iside as f32) * Q15_SCALE);
+        return (self.imid.exact_f32() * Q15_SCALE, self.iside.exact_f32() * Q15_SCALE);
     }
 
     /// Restricts the folding mask `fill` over `2 * blocks` sub-blocks to the half that carries
@@ -542,7 +555,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
                 self.remaining_bits -= 1 << BITRES;
             }
             chan[0] = if sign != 0 { -1.0_f32 } else { 1.0_f32 };
-            return Ok(());
+            Ok(())
         };
 
         decode_sign(x)?;
@@ -665,7 +678,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
             mask_shift: b0 >> 1,
         };
         return self.decode_two_halves(first, second, split.itheta, |ctx, x, lowband, part| {
-            return ctx.quant_partition(x, lowband.source, part);
+            ctx.quant_partition(x, lowband.source, part)
         });
     }
 
@@ -701,7 +714,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         else {
             for dst in &mut x[..n] {
                 self.seed = lcg_next(self.seed);
-                *dst = ((self.seed as i32) >> LCG_NOISE_SHIFT) as f32;
+                *dst = (self.seed.cast_signed() >> LCG_NOISE_SHIFT).exact_f32();
             }
             renormalise_vector(&mut x[..n], n, gain);
             return cm_mask;
@@ -737,7 +750,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         if q != 0 {
             return pvq_unquantize(
                 &mut x[..n],
-                get_pulses(q as usize),
+                get_pulses(usize::bounded_from(q)),
                 self.spread,
                 blocks,
                 self.dec,
@@ -779,7 +792,7 @@ impl<'a, 'd> BandDecoderCtx<'a, 'd> {
         let cm = tf.inverse(&mut x[..n], cm);
 
         if let Some(out) = out {
-            let scale = (n as f32).sqrt();
+            let scale = n.exact_f32().sqrt();
             for (dst, &src) in out[..n].iter_mut().zip(x[..n].iter()) {
                 *dst = scale * src;
             }
@@ -825,14 +838,15 @@ pub(super) struct Lowband<'a> {
 fn decode_step_pdf(dec: &mut Decoder<'_>, qn: i32) -> i32 {
     let x0 = qn / 2;
     let knee = STEP_PDF_WEIGHT * (x0 + 1);
-    return dec.decode_with((knee + x0) as u32, |frequency| {
-        let fs = frequency as i32;
+    // Every frequency and bound is non-negative and below the total `knee + x0`.
+    return dec.decode_with(u32::bounded_from(knee + x0), |frequency| {
+        let fs = i32::bounded_from(frequency);
         let x = if fs < knee { fs / STEP_PDF_WEIGHT } else { x0 + 1 + (fs - knee) };
         let (fl, fh) = match x <= x0 {
             true => (STEP_PDF_WEIGHT * x, STEP_PDF_WEIGHT * (x + 1)),
             false => (x - 1 - x0 + knee, x - x0 + knee),
         };
-        return (x, fl as u32, fh as u32);
+        (x, u32::bounded_from(fl), u32::bounded_from(fh))
     });
 }
 
@@ -843,19 +857,20 @@ fn decode_triangular_pdf(dec: &mut Decoder<'_>, qn: i32) -> i32 {
     let half_qn = qn >> 1;
     let ft = (half_qn + 1) * (half_qn + 1);
     let rising = (half_qn * (half_qn + 1)) >> 1;
-    return dec.decode_with(ft as u32, |frequency| {
-        let fm = frequency as i32;
+    // Every frequency and bound is non-negative and at most the total `ft`.
+    return dec.decode_with(u32::bounded_from(ft), |frequency| {
+        let fm = i32::bounded_from(frequency);
         let (x, fl, fs) = match fm < rising {
             true => {
-                let x = ((((8 * fm + 1) as u32).isqrt() as i32) - 1) >> 1;
+                let x = ((8 * fm + 1).isqrt() - 1) >> 1;
                 (x, (x * (x + 1)) >> 1, x + 1)
             }
             false => {
-                let x = (2 * (qn + 1) - (((8 * (ft - fm - 1) + 1) as u32).isqrt() as i32)) >> 1;
+                let x = (2 * (qn + 1) - (8 * (ft - fm - 1) + 1).isqrt()) >> 1;
                 (x, ft - (((qn + 1 - x) * (qn + 2 - x)) >> 1), qn + 1 - x)
             }
         };
-        return (x, fl as u32, (fl + fs) as u32);
+        (x, u32::bounded_from(fl), u32::bounded_from(fl + fs))
     });
 }
 
@@ -872,7 +887,7 @@ fn decode_theta_symbol(
     return match (kind, band_width > 2, block_count > 1) {
         (SplitKind::Stereo, true, _) => Ok(decode_step_pdf(dec, qn)),
         (SplitKind::Stereo, false, _) | (SplitKind::Partition, _, true) => {
-            Ok(dec.decode_uint((qn + 1) as u32)? as i32)
+            Ok(i32::bounded_from(dec.decode_uint(u32::bounded_from(qn + 1))?))
         }
         (SplitKind::Partition, _, false) => Ok(decode_triangular_pdf(dec, qn)),
     };
@@ -905,7 +920,8 @@ fn short_block_delta(
     if split.itheta > THETA_HALF_Q14 {
         return split.delta - (split.delta >> (4 - next_level.exponent()));
     }
-    return 0.min(split.delta + (((half_n as i32) << BITRES) >> (5 - next_level.exponent())));
+    return 0
+        .min(split.delta + ((i32::bounded_from(half_n) << BITRES) >> (5 - next_level.exponent())));
 }
 
 /// Time-frequency layout of a band of `n` bins over `initial_blocks` short blocks after the
@@ -931,8 +947,8 @@ struct TimeFrequency {
 impl TimeFrequency {
     fn new(n: usize, initial_blocks: usize, tf_change: i32) -> Self {
         debug_assert!(initial_blocks >= 1 && initial_blocks.is_power_of_two());
-        let recombine = tf_change.max(0) as usize;
-        let divisions = (-tf_change).max(0) as usize;
+        let recombine = usize::bounded_from(tf_change.max(0));
+        let divisions = usize::bounded_from((-tf_change).max(0));
         let n_b0 = (n >> initial_blocks.trailing_zeros()) << recombine;
         let time_divide = (0..divisions).take_while(|&k| ((n_b0 >> k) & 1) == 0).count();
         return Self {

@@ -44,7 +44,7 @@ fn std_consts_are_bit_identical_to_reference_literals() {
 fn spreading_rotation_matches_recorded_values() {
     let mut x = [0.0_f32; 16];
     for (i, slot) in x.iter_mut().enumerate() {
-        *slot = ((i + 1) as f32) * 0.1_f32;
+        *slot = (i + 1).exact_f32() * 0.1_f32;
     }
     renormalise_vector(&mut x, 16, 1.0_f32);
     spreading_rotation(&mut x, 2, 5, Spread::Normal);
