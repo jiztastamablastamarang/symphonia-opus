@@ -115,8 +115,8 @@ fn voiced_wb_concealment_of_3_losses_and_glue_regression_pin() {
         frame.output_pcm[i] = ((((i as i32) * 97 + 13) % 1601) - 800) as i16;
         ch_state.output_history[i] = frame.output_pcm[i];
     }
-    for i in 0..16 {
-        ch_state.lpc_state_q14[i] = ((i as i32) - 8) * 12_345;
+    for (i, state) in ch_state.lpc_state_q14[..16].iter_mut().enumerate() {
+        *state = ((i as i32) - 8) * 12_345;
     }
 
     let mut pcm_buf = frame.output_pcm;
@@ -205,8 +205,8 @@ fn unvoiced_nb_concealment_of_3_losses_regression_pin() {
         frame.output_pcm[i] = ((((i as i32) * 67 + 19) % 801) - 400) as i16;
         ch_state.output_history[i] = frame.output_pcm[i];
     }
-    for i in 0..10 {
-        ch_state.lpc_state_q14[i] = (5 - (i as i32)) * 8192;
+    for (i, state) in ch_state.lpc_state_q14[..10].iter_mut().enumerate() {
+        *state = (5 - (i as i32)) * 8192;
     }
 
     let mut pcm_buf = [0i16; 160];

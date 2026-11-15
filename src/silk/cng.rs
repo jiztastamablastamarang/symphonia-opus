@@ -388,8 +388,8 @@ mod tests {
         for (i, &gain) in gains_f1.iter().enumerate() {
             frame1.subframes[i].gain_q16 = gain;
         }
-        for i in 0..160 {
-            frame1.exc_q14[i] = (((i as i32) * 193 + 7) % 501 - 250) * 28;
+        for (i, exc) in frame1.exc_q14[..160].iter_mut().enumerate() {
+            *exc = (((i as i32) * 193 + 7) % 501 - 250) * 28;
         }
 
         record_decoded(&mut plc, &mut ch_state, &frame1);
@@ -432,17 +432,17 @@ mod tests {
         let mut frame = Frame::new(320, 4, 16);
         frame.frame_type = FrameType::new(SignalType::Voiced, QuantizationOffsetType::Low);
         frame.ltp_scale_q14 = 15_565;
-        for i in 0..4 {
-            frame.subframes[i].pitch_lag = 60;
-            frame.subframes[i].ltp_coeffs = [0, 0, 20, 0, 0];
-            frame.subframes[i].gain_q16 = 65_536;
+        for subframe in &mut frame.subframes {
+            subframe.pitch_lag = 60;
+            subframe.ltp_coeffs = [0, 0, 20, 0, 0];
+            subframe.gain_q16 = 65_536;
         }
         record_decoded(&mut plc, &mut ch_state, &frame);
         assert_eq!(plc.pitch_l_q8, 15_360);
         assert_eq!(plc.ltp_coef_q14, [0, 0, 11_467, 0, 0]);
 
-        for i in 0..4 {
-            frame.subframes[i].ltp_coeffs = [0, 40, 60, 40, 0];
+        for subframe in &mut frame.subframes {
+            subframe.ltp_coeffs = [0, 40, 60, 40, 0];
         }
         record_decoded(&mut plc, &mut ch_state, &frame);
         assert_eq!(plc.ltp_coef_q14, [0, 0, 15_564, 0, 0]);
@@ -456,12 +456,12 @@ mod tests {
         ch_state.references.prev_nlsf_q15 = NLSF_WB;
         frame.frame_type = FrameType::new(SignalType::Inactive, QuantizationOffsetType::Low);
         let a_wb = nlsf_to_lpc_q12(&NLSF_WB).unwrap();
-        for i in 0..4 {
-            frame.subframes[i].gain_q16 = 50_000_000;
-            frame.subframes[i].lpc_coeffs_q12 = a_wb;
+        for subframe in &mut frame.subframes {
+            subframe.gain_q16 = 50_000_000;
+            subframe.lpc_coeffs_q12 = a_wb;
         }
-        for i in 0..320 {
-            frame.exc_q14[i] = (((i as i32) * 97 + 13) % 401 - 200) * 64;
+        for (i, exc) in frame.exc_q14[..320].iter_mut().enumerate() {
+            *exc = (((i as i32) * 97 + 13) % 401 - 200) * 64;
         }
 
         let mut pcm_buf = [0i16; 320];
