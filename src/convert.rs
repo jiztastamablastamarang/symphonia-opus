@@ -100,7 +100,6 @@ pub(crate) const fn wrap_i16(a: i32) -> i16 {
 
 /// Keeps the low 32 bits of `a` as a two's-complement value: the `(opus_int32)` narrowing of
 /// 64-bit products in the RFC 6716 Appendix A fixed-point macros (for example `silk_SMULWW`).
-#[cfg_attr(not(test), expect(dead_code, reason = "first used by a later module conversion"))]
 #[inline(always)]
 #[expect(clippy::cast_possible_truncation, reason = "the RFC reference narrows by truncation")]
 pub(crate) const fn wrap_i32(a: i64) -> i32 {

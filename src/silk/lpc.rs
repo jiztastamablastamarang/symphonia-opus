@@ -8,15 +8,24 @@
 //! conversion, coefficient limiting by bandwidth expansion, the prediction gain stability test,
 //! and the LTP and LPC prediction and synthesis loops.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
+use crate::convert::{BoundedFrom, wrap_i16, wrap_i32};
 use crate::fixed::{
     mul_add_q16_i16, mul_high_i32, mul_q16, reciprocal_q, round_shift, round_shift_i64,
     saturate_i16, shl_saturating_const,
 };
-use crate::silk::MAX_LPC_ORDER;
 use crate::silk::constant;
 use crate::silk::error::Error;
+use crate::silk::{LTP_ORDER, MAX_LPC_ORDER};
 
 /// Q10 LPC prediction to Q14 output left shift (RFC 6716 Section 4.2.7.9.2).
 const LPC_PRED_Q10_TO_Q14_SHIFT: u32 = 4;
@@ -26,6 +35,8 @@ const LPC_OUT_Q14_GAIN_TO_PCM_SHIFT: u32 = 8;
 const LTP_PRED_ROUNDING_BIAS_Q13: i32 = 2;
 /// Fractional bits of the NLSF to LPC conversion polynomials (RFC 6716 Section 4.2.7.5.6).
 const QA: u32 = 16;
+/// Right shift from the `QA + 1` conversion output to the Q12 coefficients (RFC 6716 Section 4.2.7.5.6).
+const QA1_TO_Q12_SHIFT: u32 = QA + 1 - 12;
 /// Q15 NLSF to cosine table index right shift (RFC 6716 Section 4.2.7.5.6).
 const NLSF_TABLE_INDEX_SHIFT: i32 = 8;
 /// Bits dropped when the interpolated Q20 cosine becomes a QA value (RFC 6716 Section 4.2.7.5.6).
@@ -66,10 +77,12 @@ const MAX_DC_RESPONSE_Q12: i32 = 4096;
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.2>
 #[inline]
 pub(crate) fn lpc_predict_q10(history_q14: &[i32], a_q12: &[i16]) -> i32 {
-    let newest = history_q14.len() - 1;
-    return a_q12.iter().enumerate().fold((a_q12.len() >> 1) as i32, |acc, (j, &a_tap)| {
-        mul_add_q16_i16(acc, history_q14[newest - j], a_tap)
-    });
+    // Order 10 or 16: the rounding bias `order / 2` is at most 8.
+    let bias = i32::bounded_from(a_q12.len() >> 1);
+    return a_q12
+        .iter()
+        .zip(history_q14.iter().rev())
+        .fold(bias, |acc, (&a_tap, &sample_q14)| mul_add_q16_i16(acc, sample_q14, a_tap));
 }
 
 /// Computes the Q13 long-term (pitch) prediction for the sample following `history_q15`
@@ -80,18 +93,16 @@ pub(crate) fn lpc_predict_q10(history_q14: &[i32], a_q12: &[i16]) -> i32 {
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.1>
 #[inline]
-pub(crate) fn ltp_predict_q13(history_q15: &[i32], b_q14: &[i16]) -> i32 {
-    if let (Some(hist), Ok(taps)) = (history_q15.last_chunk::<5>(), <&[i16; 5]>::try_from(b_q14)) {
-        let acc = mul_add_q16_i16(LTP_PRED_ROUNDING_BIAS_Q13, hist[4], taps[0]);
-        let acc = mul_add_q16_i16(acc, hist[3], taps[1]);
-        let acc = mul_add_q16_i16(acc, hist[2], taps[2]);
-        let acc = mul_add_q16_i16(acc, hist[1], taps[3]);
-        return mul_add_q16_i16(acc, hist[0], taps[4]);
-    }
-    let newest = history_q15.len() - 1;
-    return b_q14.iter().enumerate().fold(LTP_PRED_ROUNDING_BIAS_Q13, |acc, (j, &b_tap)| {
-        mul_add_q16_i16(acc, history_q15[newest - j], b_tap)
-    });
+pub(crate) fn ltp_predict_q13(history_q15: &[i32], b_q14: &[i16; LTP_ORDER]) -> i32 {
+    debug_assert!(history_q15.len() >= LTP_ORDER, "{} LTP history samples", history_q15.len());
+    let history = history_q15.last_chunk::<LTP_ORDER>().unwrap_or(&[0; LTP_ORDER]);
+    return history
+        .iter()
+        .rev()
+        .zip(b_q14)
+        .fold(LTP_PRED_ROUNDING_BIAS_Q13, |acc, (&sample_q15, &tap)| {
+            mul_add_q16_i16(acc, sample_q15, tap)
+        });
 }
 
 /// Synthesizes sample `i` of the all-pole LPC filter in place (RFC 6716 Section 4.2.7.9.2).
@@ -137,21 +148,28 @@ fn lpc_synthesize_order<const ORDER: usize>(
     let n = out_pcm.len();
     let state = &mut state_q14[MAX_LPC_ORDER - ORDER..MAX_LPC_ORDER + n];
     let a0 = a_q12[0];
-    let a_tail_rev: [i16; ORDER] = std::array::from_fn(|k| a_q12[ORDER - 1 - k]);
-    let tail_taps = &a_tail_rev[..ORDER - 1];
-    let bias = (ORDER >> 1) as i32;
+    let mut a_rev = *a_q12;
+    a_rev.reverse();
+    let tail_taps = &a_rev[..ORDER - 1];
+    let bias = i32::bounded_from(ORDER >> 1);
     let mut s0 = state[ORDER - 1];
 
+    // Indexing (P): each output is written back into the history that the next windows read.
+    // This in-place window measured faster than iterating `windows` over a slice of cells
+    // (`silk_wb_mono_20ms` 3.4% slower with cells).
     for (i, out_sample) in out_pcm.iter_mut().enumerate() {
-        let window = &mut state[i..i + ORDER + 1];
-        let tail_sum = window[..ORDER - 1]
+        let Some((current, history)) = state[i..i + ORDER + 1].split_last_mut()
+        else {
+            continue;
+        };
+        let tail_sum = history
             .iter()
-            .zip(tail_taps.iter())
+            .zip(tail_taps)
             .fold(bias, |acc, (&sample_q14, &tap_q12)| mul_add_q16_i16(acc, sample_q14, tap_q12));
         let lpc_pred_q10 = mul_add_q16_i16(tail_sum, s0, a0);
-        let lpc_out_q14 = window[ORDER]
-            .saturating_add(shl_saturating_const::<LPC_PRED_Q10_TO_Q14_SHIFT>(lpc_pred_q10));
-        window[ORDER] = lpc_out_q14;
+        let lpc_out_q14 =
+            current.saturating_add(shl_saturating_const::<LPC_PRED_Q10_TO_Q14_SHIFT>(lpc_pred_q10));
+        *current = lpc_out_q14;
         s0 = lpc_out_q14;
         *out_sample = saturate_i16(round_shift(
             mul_q16(lpc_out_q14, gain_q10),
@@ -167,7 +185,7 @@ fn lpc_synthesize_order<const ORDER: usize>(
 /// `state_q14[..MAX_LPC_ORDER]` holds the filter history and
 /// `state_q14[MAX_LPC_ORDER..MAX_LPC_ORDER + out_pcm.len()]` holds the Q14 excitation,
 /// which is replaced by the Q14 synthesized signal; `out_pcm` receives the signal scaled
-/// by the Q10 subframe gain and saturated to 16 bits.
+/// by the Q10 subframe gain and saturated to 16 bits. SILK filters have order 10 or 16.
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.2>
 pub(crate) fn lpc_synthesize_q14(
@@ -176,17 +194,11 @@ pub(crate) fn lpc_synthesize_q14(
     gain_q10: i32,
     out_pcm: &mut [i16],
 ) {
-    if let Ok(taps) = <&[i16; 10]>::try_from(a_q12) {
-        lpc_synthesize_order::<10>(state_q14, taps, gain_q10, out_pcm);
-        return;
+    match (<&[i16; 10]>::try_from(a_q12), <&[i16; 16]>::try_from(a_q12)) {
+        (Ok(taps), _) => lpc_synthesize_order(state_q14, taps, gain_q10, out_pcm),
+        (_, Ok(taps)) => lpc_synthesize_order(state_q14, taps, gain_q10, out_pcm),
+        _ => debug_assert!(false, "SILK LPC order is 10 or 16, not {}", a_q12.len()),
     }
-    if let Ok(taps) = <&[i16; 16]>::try_from(a_q12) {
-        lpc_synthesize_order::<16>(state_q14, taps, gain_q10, out_pcm);
-        return;
-    }
-    out_pcm.iter_mut().enumerate().for_each(|(i, out_sample)| {
-        *out_sample = lpc_synthesize_sample_q14(state_q14, i, a_q12, gain_q10);
-    });
     return;
 }
 
@@ -205,24 +217,29 @@ pub(crate) fn nlsf_to_lpc_q12(nlsf_q15: &[i16]) -> Result<[i16; MAX_LPC_ORDER]> 
 
     let mut cos_lsf_qa = [0i32; MAX_LPC_ORDER];
     for (&nlsf_q15, &position) in nlsf_q15.iter().zip(ordering.iter()) {
-        cos_lsf_qa[position as usize] = cosine_of_nlsf_qa(nlsf_q15);
+        cos_lsf_qa[usize::from(position)] = cosine_of_nlsf_qa(nlsf_q15);
     }
 
     let dd = d >> 1;
     let p = find_lpc_polynomial(&cos_lsf_qa, 0, dd);
     let q = find_lpc_polynomial(&cos_lsf_qa, 1, dd);
 
+    // The order is even: coefficient `k` and its mirror `d - 1 - k` come from the same pair of
+    // adjacent P and Q polynomial terms.
     let mut a32_qa1 = [0i32; MAX_LPC_ORDER];
-    for i in 0..dd {
-        let p_tmp = p[i + 1].wrapping_add(p[i]);
-        let q_tmp = q[i + 1].wrapping_sub(q[i]);
-
-        a32_qa1[i] = (-q_tmp).wrapping_sub(p_tmp);
-        a32_qa1[d - i - 1] = q_tmp.wrapping_sub(p_tmp);
+    let (low_half, high_half) = a32_qa1[..d].split_at_mut(dd);
+    let terms = p.array_windows::<2>().zip(q.array_windows::<2>());
+    for ((low, high), (&[p0, p1], &[q0, q1])) in
+        low_half.iter_mut().zip(high_half.iter_mut().rev()).zip(terms)
+    {
+        let p_tmp = p1.wrapping_add(p0);
+        let q_tmp = q1.wrapping_sub(q0);
+        *low = q_tmp.wrapping_neg().wrapping_sub(p_tmp);
+        *high = q_tmp.wrapping_sub(p_tmp);
     }
 
     let mut a_q12 = [0i16; MAX_LPC_ORDER];
-    fit_lpc_to_i16(&mut a_q12[..d], &mut a32_qa1[..d], 12, (QA + 1) as i32);
+    fit_lpc_to_i16(&mut a_q12[..d], &mut a32_qa1[..d], QA1_TO_Q12_SHIFT);
 
     for i in 0..MAX_LPC_STABILIZE_ITERATIONS {
         if inverse_prediction_gain_q30(&a_q12[..d]) != 0 {
@@ -230,7 +247,8 @@ pub(crate) fn nlsf_to_lpc_q12(nlsf_q15: &[i16]) -> Result<[i16; MAX_LPC_ORDER]> 
         }
         bandwidth_expand_q16(&mut a32_qa1[..d], UNIT_CHIRP_Q16 - (2 << i));
         for (a_tap, &a32) in a_q12[..d].iter_mut().zip(a32_qa1[..d].iter()) {
-            *a_tap = round_shift(a32, QA + 1 - 12) as i16;
+            // The reference decoder narrows with a 16-bit cast.
+            *a_tap = wrap_i16(round_shift(a32, QA1_TO_Q12_SHIFT));
         }
     }
 
@@ -243,9 +261,9 @@ pub(crate) fn nlsf_to_lpc_q12(nlsf_q15: &[i16]) -> Result<[i16; MAX_LPC_ORDER]> 
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.5.6>
 #[inline]
 fn cosine_of_nlsf_qa(nlsf_q15: i16) -> i32 {
-    let nlsf = (nlsf_q15 as i32).clamp(0, i16::MAX as i32);
-    let f_int = (nlsf >> NLSF_TABLE_INDEX_SHIFT) as usize;
-    let f_frac = nlsf - ((f_int as i32) << NLSF_TABLE_INDEX_SHIFT);
+    let nlsf = i32::from(nlsf_q15.max(0));
+    let f_int = usize::bounded_from(nlsf >> NLSF_TABLE_INDEX_SHIFT);
+    let f_frac = nlsf & ((1 << NLSF_TABLE_INDEX_SHIFT) - 1);
 
     let cos_val = constant::Q12_COSINE_TABLE_FOR_LSF_CONVERSION[f_int];
     let delta = constant::Q12_COSINE_TABLE_FOR_LSF_CONVERSION[f_int + 1] - cos_val;
@@ -269,16 +287,19 @@ fn find_lpc_polynomial(
     out[0] = 1 << QA;
     out[1] = -cos_lsf_qa[start_offset];
 
-    for i in 1..dd {
-        let ftmp = cos_lsf_qa[start_offset + 2 * i] as i64;
+    // Indexing (A): each root updates `out[j]` from `out[j - 1]` and `out[j - 2]` in place,
+    // highest term first, and the products narrow with the reference decoder's 32-bit cast.
+    let roots = cos_lsf_qa.iter().skip(start_offset + 2).step_by(2);
+    for (i, &root) in (1..dd).zip(roots) {
+        let ftmp = i64::from(root);
         out[i + 1] =
-            (out[i - 1] << 1).wrapping_sub(round_shift_i64(ftmp * (out[i] as i64), QA) as i32);
+            (out[i - 1] << 1).wrapping_sub(wrap_i32(round_shift_i64(ftmp * i64::from(out[i]), QA)));
         for j in (2..=i).rev() {
             out[j] = out[j]
                 .wrapping_add(out[j - 2])
-                .wrapping_sub(round_shift_i64(ftmp * (out[j - 1] as i64), QA) as i32);
+                .wrapping_sub(wrap_i32(round_shift_i64(ftmp * i64::from(out[j - 1]), QA)));
         }
-        out[1] = out[1].wrapping_sub(ftmp as i32);
+        out[1] = out[1].wrapping_sub(root);
     }
 
     return out;
@@ -289,19 +310,20 @@ fn find_lpc_polynomial(
 /// (RFC 6716 Section 4.2.7.5.7).
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.5.7>
-pub(crate) fn fit_lpc_to_i16(a_qout: &mut [i16], a_qin: &mut [i32], q_out: i32, q_in: i32) {
-    let shift = (q_in - q_out) as u32;
+pub(crate) fn fit_lpc_to_i16(a_qout: &mut [i16], a_qin: &mut [i32], shift: u32) {
     if expand_until_fits_i16(a_qin, shift) {
+        // Every coefficient now rounds into 16 bits.
         a_qout.iter_mut().zip(a_qin.iter()).for_each(|(out, &a_in)| {
-            *out = round_shift(a_in, shift) as i16;
+            *out = i16::bounded_from(round_shift(a_in, shift));
         });
         return;
     }
 
     a_qout.iter_mut().zip(a_qin.iter_mut()).for_each(|(out, a_in)| {
         *out = saturate_i16(round_shift(*a_in, shift));
-        *a_in = (*out as i32) << shift;
+        *a_in = i32::from(*out) << shift;
     });
+    return;
 }
 
 /// Expands the bandwidth of `a_qin` until every coefficient shifted right by `shift` fits in
@@ -317,13 +339,14 @@ fn expand_until_fits_i16(a_qin: &mut [i32], shift: u32) -> bool {
             });
 
         let maxabs = round_shift(maxabs, shift);
-        if maxabs <= i16::MAX as i32 {
+        if maxabs <= i32::from(i16::MAX) {
             return true;
         }
 
         let maxabs = maxabs.min(MAX_FIT_MAGNITUDE);
-        let numer = (maxabs - (i16::MAX as i32)) << 14;
-        let denom = (maxabs * ((max_i as i32) + 1)) >> 2;
+        let numer = (maxabs - i32::from(i16::MAX)) << 14;
+        // `max_i` indexes at most 16 coefficients.
+        let denom = (maxabs * (i32::bounded_from(max_i) + 1)) >> 2;
         bandwidth_expand_q16(a_qin, FIT_CHIRP_BASE_Q16 - (numer / denom));
     }
     return false;
@@ -362,29 +385,31 @@ pub(crate) fn inverse_prediction_gain_q30(a_q12: &[i16]) -> i32 {
         return 0;
     }
 
-    let dc_resp = a_q12.iter().fold(0i32, |acc, &coeff| acc + coeff as i32);
+    let dc_resp = a_q12.iter().fold(0i32, |acc, &coeff| acc + i32::from(coeff));
     if dc_resp >= MAX_DC_RESPONSE_Q12 {
         return 0;
     }
 
     let mut a_qa = [0i32; MAX_LPC_ORDER];
     for (a_tap, &coeff) in a_qa.iter_mut().zip(a_q12.iter()) {
-        *a_tap = (coeff as i32) << Q12_TO_INV_GAIN_QA_SHIFT;
+        *a_tap = i32::from(coeff) << Q12_TO_INV_GAIN_QA_SHIFT;
     }
 
+    // Remove the highest remaining tap until none is left.
     let mut inv_gain_q30 = UNIT_INV_GAIN_Q30;
-    for i in (1..order).rev() {
-        let Some(step) = ReflectionStep::new(a_qa[i], inv_gain_q30)
+    let mut remaining: &mut [i32] = &mut a_qa[..order];
+    while let Some((&mut highest, lower)) = std::mem::take(&mut remaining).split_last_mut() {
+        let Some(step) = ReflectionStep::new(highest, inv_gain_q30)
         else {
             return 0;
         };
         inv_gain_q30 = step.inv_gain_q30;
-        if !step.step_down(&mut a_qa[..i]) {
+        if !step.step_down(lower) {
             return 0;
         }
+        remaining = lower;
     }
-
-    return ReflectionStep::new(a_qa[0], inv_gain_q30).map_or(0, |step| step.inv_gain_q30);
+    return inv_gain_q30;
 }
 
 /// One step of the backward Levinson recursion of the stability test: the reflection
@@ -424,24 +449,31 @@ impl ReflectionStep {
     ///
     /// <https://datatracker.ietf.org/doc/html/rfc8251#section-6>
     fn step_down(&self, a_qa: &mut [i32]) -> bool {
-        let i = a_qa.len();
-        let mult2_q = 32 - (self.rc_mult1_q30.unsigned_abs().leading_zeros() as i32);
+        // A bit width of at most 32.
+        let mult2_q =
+            i32::bounded_from(u32::BITS - self.rc_mult1_q30.unsigned_abs().leading_zeros());
         let rc_mult2 = reciprocal_q(self.rc_mult1_q30, mult2_q + 30);
 
-        for j in 0..((i + 1) >> 1) {
-            let tmp1 = a_qa[j];
-            let tmp2 = a_qa[i - j - 1];
-
-            let Some(low) = self.remove_reflection(tmp1, tmp2, rc_mult2, mult2_q)
+        // Tap `j` and its mirror are updated from each other; an odd middle tap mirrors itself.
+        let half = a_qa.len() / 2;
+        let (low_half, rest) = a_qa.split_at_mut(half);
+        let (middle, high_half) = rest.split_at_mut(rest.len() - half);
+        for (low, high) in low_half.iter_mut().zip(high_half.iter_mut().rev()) {
+            let (Some(new_low), Some(new_high)) = (
+                self.remove_reflection(*low, *high, rc_mult2, mult2_q),
+                self.remove_reflection(*high, *low, rc_mult2, mult2_q),
+            )
             else {
                 return false;
             };
-            let Some(high) = self.remove_reflection(tmp2, tmp1, rc_mult2, mult2_q)
+            (*low, *high) = (new_low, new_high);
+        }
+        for tap in middle {
+            let Some(new_tap) = self.remove_reflection(*tap, *tap, rc_mult2, mult2_q)
             else {
                 return false;
             };
-            a_qa[j] = low;
-            a_qa[i - j - 1] = high;
+            *tap = new_tap;
         }
         return true;
     }
@@ -450,9 +482,9 @@ impl ReflectionStep {
     /// `None` when the result overflows 32 bits (RFC 8251 Section 6).
     #[inline]
     fn remove_reflection(&self, tap: i32, mirror: i32, rc_mult2: i32, mult2_q: i32) -> Option<i32> {
-        let prod = round_shift_i64((mirror as i64) * (self.rc_q31 as i64), 31) as i32;
+        let prod = wrap_i32(round_shift_i64(i64::from(mirror) * i64::from(self.rc_q31), 31));
         let diff = i64::from(tap.saturating_sub(prod));
-        let scaled = round_shift_i64(diff * (rc_mult2 as i64), mult2_q as u32);
+        let scaled = round_shift_i64(diff * i64::from(rc_mult2), mult2_q.unsigned_abs());
         return i32::try_from(scaled).ok();
     }
 }
