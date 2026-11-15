@@ -6,14 +6,6 @@
 //! 20 ms frame. The per-bandwidth tables are grouped behind [`NlsfCodebook`]; the conversion to
 //! LPC coefficients lives in [`crate::silk::lpc`].
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::convert::{BoundedFrom, wrap_i16};

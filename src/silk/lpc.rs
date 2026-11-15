@@ -8,14 +8,6 @@
 //! conversion, coefficient limiting by bandwidth expansion, the prediction gain stability test,
 //! and the LTP and LPC prediction and synthesis loops.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::convert::{BoundedFrom, wrap_i16, wrap_i32};
@@ -158,7 +150,7 @@ fn lpc_synthesize_order<const ORDER: usize>(
     // This in-place window measured faster than iterating `windows` over a slice of cells
     // (`silk_wb_mono_20ms` 3.4% slower with cells).
     for (i, out_sample) in out_pcm.iter_mut().enumerate() {
-        let Some((current, history)) = state[i..i + ORDER + 1].split_last_mut()
+        let Some((current, history)) = state[i..=i + ORDER].split_last_mut()
         else {
             continue;
         };

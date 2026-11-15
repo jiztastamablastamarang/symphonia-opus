@@ -546,10 +546,10 @@ struct TimingStats {
 
 fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     let last = sorted.len() - 1;
-    let pos = q * (last as f64);
-    let lower = pos.floor() as usize;
-    let upper = pos.ceil() as usize;
-    let frac = pos - (lower as f64);
+    let pos = q * count_f64(last);
+    let lower = whole_index(pos.floor());
+    let upper = whole_index(pos.ceil());
+    let frac = pos - count_f64(lower);
     return sorted[lower] + (sorted[upper] - sorted[lower]) * frac;
 }
 
@@ -729,7 +729,7 @@ fn print_micro_header(mode: RunMode) {
 
 fn print_micro_row(row: &BenchRow) {
     let median_str = format_median_time(row.stats.median_secs);
-    let msample_per_sec = (row.total_samples as f64) / (row.stats.median_secs * 1_000_000.0);
+    let msample_per_sec = count_f64(row.total_samples) / (row.stats.median_secs * 1_000_000.0);
     let realtime_factor = row.audio_secs / row.stats.median_secs;
     println!(
         "{:<26} {:>6} {:>10} {:>10} {:>10} {:>6.1}% {:>10.2} {:>9.1}x",
@@ -788,7 +788,7 @@ fn run_embedded_suite(cfg: &CliConfig) {
                 packets: pkts,
                 frames_per_ch: frames,
                 total_samples: samples,
-                audio_secs: (frames as f64) / f64::from(MICRO_SAMPLE_RATE_HZ),
+                audio_secs: count_f64(frames) / f64::from(MICRO_SAMPLE_RATE_HZ),
                 stats: summarize_samples(&raw_secs),
             };
             print_micro_row(&row);
@@ -825,7 +825,7 @@ fn run_embedded_suite(cfg: &CliConfig) {
                 packets: pkts,
                 frames_per_ch: frames,
                 total_samples: samples,
-                audio_secs: (frames as f64) / f64::from(MICRO_SAMPLE_RATE_HZ),
+                audio_secs: count_f64(frames) / f64::from(MICRO_SAMPLE_RATE_HZ),
                 stats: summarize_samples(&raw_secs),
             };
             print_micro_row(&row);
@@ -1110,10 +1110,10 @@ fn run_corpus_config(
 
     for (slot, &(_, vec_name, _)) in parsed_vectors.iter().enumerate() {
         let (pkts, frames, samples) = per_vec_meta[slot];
-        let audio_secs = (frames as f64) / f64::from(corpus_cfg.sample_rate_hz);
+        let audio_secs = count_f64(frames) / f64::from(corpus_cfg.sample_rate_hz);
         let stats = summarize_samples(&per_vec_secs[slot]);
         let median_ms = stats.median_secs * 1_000.0;
-        let msample_s = (samples as f64) / (stats.median_secs * 1_000_000.0);
+        let msample_s = count_f64(samples) / (stats.median_secs * 1_000_000.0);
         let rt = audio_secs / stats.median_secs;
         println!(
             "{:<24} {:>7} {:>8.1}s {:>11} {:>7.2} ms {:>6.1}% {:>11.2} {:>9.1}x",
@@ -1124,10 +1124,10 @@ fn run_corpus_config(
         grand_samples += samples;
     }
 
-    let total_audio_secs = (grand_frames as f64) / f64::from(corpus_cfg.sample_rate_hz);
+    let total_audio_secs = count_f64(grand_frames) / f64::from(corpus_cfg.sample_rate_hz);
     let total_stats = summarize_samples(&total_pass_secs);
     let total_median_ms = total_stats.median_secs * 1_000.0;
-    let total_msample_s = (grand_samples as f64) / (total_stats.median_secs * 1_000_000.0);
+    let total_msample_s = count_f64(grand_samples) / (total_stats.median_secs * 1_000_000.0);
     let total_rt = total_audio_secs / total_stats.median_secs;
     let total_label = format!("TOTAL ({total_audio_secs:.1}s audio)");
 
@@ -1168,7 +1168,7 @@ fn run_rfc8251_corpus_suite(dir: &Path, cfg: &CliConfig) {
             let records = parse_bit_records(&vec_file.raw_bytes).unwrap_or_else(|err| {
                 panic!("malformed {}.bit in {}: {err}", vec_file.name, dir.display())
             });
-            return (vec_file.number, vec_file.name.as_str(), records);
+            (vec_file.number, vec_file.name.as_str(), records)
         })
         .collect();
 
@@ -1210,7 +1210,7 @@ fn run_rfc8251_corpus_suite(dir: &Path, cfg: &CliConfig) {
     println!("{}", "-".repeat(96));
     for item in &summaries {
         let median_ms = item.stats.median_secs * 1_000.0;
-        let msample_s = (item.total_samples as f64) / (item.stats.median_secs * 1_000_000.0);
+        let msample_s = count_f64(item.total_samples) / (item.stats.median_secs * 1_000_000.0);
         let rt = item.audio_secs / item.stats.median_secs;
         println!(
             "{:<26} {:>8.1}s {:>11} {:>9} {:>7.2} ms {:>6.1}% {:>9.2} {:>7.1}x",
@@ -1246,4 +1246,23 @@ fn main() {
     let dir = PathBuf::from(dir_os);
     run_rfc8251_corpus_suite(&dir, &cfg);
     return;
+}
+
+/// Converts a frame or sample count to `f64`, exact for every count a benchmark reaches (far
+/// below `2^53`).
+#[expect(clippy::cast_precision_loss, reason = "counts below 2^53 are exact in f64")]
+fn count_f64(n: usize) -> f64 {
+    debug_assert!(u64::try_from(n).is_ok_and(|n| n < 1 << f64::MANTISSA_DIGITS));
+    return n as f64;
+}
+
+/// Converts an integral, non-negative position inside a sample slice to its index.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integral, non-negative and below the slice length"
+)]
+fn whole_index(x: f64) -> usize {
+    debug_assert!(x >= 0.0 && x.fract() == 0.0);
+    return x as usize;
 }

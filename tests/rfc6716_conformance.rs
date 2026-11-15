@@ -101,24 +101,21 @@ fn rfc8251_reference_decoder_sample_comparison() {
                 let vec_dir = vec_dir.as_path();
                 let ref_dir = ref_dir.as_path();
                 let runs = runs.as_slice();
-                return scope.spawn(move || {
-                    return runs
-                        .iter()
+                scope.spawn(move || {
+                    runs.iter()
                         .skip(i)
                         .step_by(workers)
                         .map(|&(vector, rate, layout)| {
-                            return compare_with_reference_output(
-                                vec_dir, ref_dir, vector, rate, layout,
-                            );
+                            compare_with_reference_output(vec_dir, ref_dir, vector, rate, layout)
                         })
-                        .collect::<Vec<_>>();
-                });
+                        .collect::<Vec<_>>()
+                })
             })
             .collect();
-        return handles
+        handles
             .into_iter()
             .flat_map(|handle| handle.join().expect("reference comparison worker panicked"))
-            .collect();
+            .collect()
     });
     comparisons.sort_by_key(|c| (c.rate, c.layout.channels(), c.vector));
 

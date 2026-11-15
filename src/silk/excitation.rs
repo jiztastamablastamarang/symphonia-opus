@@ -6,14 +6,6 @@
 //! pulse locations of the recursive shell partitions, the LSBs and the signs, and reconstructs
 //! the Q14 excitation with the frame-continuous pseudorandom sign and the quantization offset.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::entropy::{self, Cdf};

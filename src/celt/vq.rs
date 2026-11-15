@@ -15,14 +15,6 @@
 //! ([Section 4.3.4.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.4.5>)) and
 //! refill the blocks that collapsed ([Section 4.3.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3.5>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::celt::constant::{
     BIT_DEINTERLEAVE_TABLE, BIT_INTERLEAVE_TABLE, BITRES, EBANDS, EXP2_TABLE8,
     HADAMARD_SEQUENCY_ROWS, LOGN, MAX_BANDS, QTHETA_OFFSET, QTHETA_OFFSET_TWOPHASE, SPREAD_FACTOR,
@@ -409,6 +401,8 @@ impl HadamardOrder {
 fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, order: HadamardOrder) {
     let total = n0 * stride;
     let mut tmp = [0.0_f32; MAX_BAND_WIDTH];
+    // Indexing (A): column `i` of the interleaved band becomes row `order.row(i)`, a permutation
+    // that iterators over rows cannot follow.
     for i in 0..stride {
         let column = x[i..total].iter().step_by(stride);
         let Some(dst_row) = tmp[..total].chunks_exact_mut(n0.max(1)).nth(order.row(i, stride))
@@ -426,6 +420,7 @@ fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, order: Hadamar
 fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, order: HadamardOrder) {
     let total = n0 * stride;
     let mut tmp = [0.0_f32; MAX_BAND_WIDTH];
+    // Indexing (A): the inverse permutation of `deinterleave_hadamard`.
     for i in 0..stride {
         let column = tmp[i..total].iter_mut().step_by(stride);
         let Some(src_row) = x[..total].chunks_exact(n0.max(1)).nth(order.row(i, stride))

@@ -22,7 +22,7 @@ impl SampleComparison {
         if self.samples == 0 {
             return 100.0;
         }
-        return 100.0 * self.identical as f64 / self.samples as f64;
+        return 100.0 * count_f64(self.identical) / count_f64(self.samples);
     }
 
     pub(crate) fn is_silk_only(&self) -> bool {
@@ -82,7 +82,7 @@ pub(crate) fn compare_with_reference_output(
         (0usize, 0u16),
         |(identical, max_diff), (&actual, &expected)| {
             let diff = actual.abs_diff(expected);
-            return (identical + usize::from(diff == 0), max_diff.max(diff));
+            (identical + usize::from(diff == 0), max_diff.max(diff))
         },
     );
     return SampleComparison {

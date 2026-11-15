@@ -17,14 +17,6 @@
 //!                          +---------------------+      +-------------------+
 //! ```
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::celt::constant::{BITRES, EBANDS, MAX_BANDS, Spread, band_width};
 use crate::celt::energy::BandEnergyHistory;
 use crate::celt::rate::{BandAllocation, CacheLevel};

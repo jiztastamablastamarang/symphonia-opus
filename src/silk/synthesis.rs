@@ -7,14 +7,6 @@
 //! and LPC synthesis, unmixes the adaptive mid-side representation into left and right, and
 //! resamples the result into `f32` output.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::convert::{BoundedFrom, wrap_i16};

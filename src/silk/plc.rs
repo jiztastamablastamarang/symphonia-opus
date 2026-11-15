@@ -34,14 +34,6 @@
 //!                     +-----------------------------------+
 //! ```
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::convert::{BoundedFrom, wrap_i16};
 use crate::fixed::{
     mul_add_q16_i16, mul_low_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift, saturate_i16,

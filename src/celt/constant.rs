@@ -798,9 +798,9 @@ mod tests {
             else {
                 unreachable!()
             };
-            for band in 0..MAX_BANDS {
+            for (band, (&high, &low)) in upper.iter().zip(lower).enumerate() {
                 assert!(
-                    upper[band] >= lower[band],
+                    high >= low,
                     "ALLOC_VECTORS must be non-decreasing across quality rows at band {band}"
                 );
             }
@@ -841,15 +841,11 @@ mod tests {
     #[test]
     fn celt_window_princen_bradley_symmetry_and_monotonicity() {
         assert_eq!(CELT_WINDOW.len(), OVERLAP);
-        for i in 0..(OVERLAP - 1) {
-            assert!(
-                CELT_WINDOW[i] < CELT_WINDOW[i + 1],
-                "CELT_WINDOW must strictly increase at index {i}"
-            );
+        for (i, &[current, next]) in CELT_WINDOW.array_windows::<2>().enumerate() {
+            assert!(current < next, "CELT_WINDOW must strictly increase at index {i}");
         }
-        for i in 0..(OVERLAP / 2) {
-            let w_left = CELT_WINDOW[i];
-            let w_right = CELT_WINDOW[OVERLAP - 1 - i];
+        let halves = CELT_WINDOW.iter().zip(CELT_WINDOW.iter().rev()).take(OVERLAP / 2);
+        for (i, (&w_left, &w_right)) in halves.enumerate() {
             let sum_sq = w_left * w_left + w_right * w_right;
             assert!(
                 (sum_sq - 1.0).abs() < 1e-6,

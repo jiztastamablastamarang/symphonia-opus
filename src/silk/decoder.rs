@@ -5,14 +5,6 @@
 //! its regular frames, and unmixes, resamples and writes every frame pair as soon as it is
 //! decoded.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::entropy;

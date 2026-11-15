@@ -4,14 +4,6 @@
 //! [Section 4.2.8](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.8>),
 //! [Section 4.5.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.2>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::convert::BoundedFrom;
 use crate::silk::ResamplerState;
 use crate::silk::cng;

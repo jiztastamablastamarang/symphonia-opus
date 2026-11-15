@@ -43,7 +43,7 @@ impl Layout {
 /// saturate to 16 bits and round to nearest with ties to even (`lrintf`).
 pub(crate) fn float_to_pcm16(sample: f32) -> i16 {
     let scaled = (sample * CELT_SIG_SCALE).clamp(f32::from(i16::MIN), f32::from(i16::MAX));
-    return scaled.round_ties_even() as i16;
+    return integral_i16(scaled.round_ties_even());
 }
 
 /// First packet whose decoder final range differs from the encoder final range.

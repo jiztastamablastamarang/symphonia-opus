@@ -4,6 +4,7 @@
 mod compare;
 mod decode;
 mod digest;
+mod numeric;
 pub(crate) mod opus_compare;
 mod records;
 mod report;
@@ -11,6 +12,7 @@ mod report;
 pub(crate) use compare::*;
 pub(crate) use decode::*;
 pub(crate) use digest::*;
+pub(crate) use numeric::*;
 pub(crate) use records::*;
 pub(crate) use report::*;
 

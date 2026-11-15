@@ -66,14 +66,6 @@
 //!   orchestration ([RFC 6716 Section 4.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3>),
 //!   [Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 pub(crate) mod bands;
 pub(crate) mod constant;
 pub(crate) mod cwrs;

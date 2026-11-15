@@ -200,8 +200,8 @@ mod tests {
         let written_16k = deemphasis_channel(&input, &mut pcm_16k, 3, &mut mem_16k);
         assert_eq!(written_16k, 16);
         assert!((mem_48k - mem_16k).abs() < 1.0e-5);
-        for k in 0..16 {
-            assert!((pcm_16k[k] - pcm_48k[3 * k]).abs() < 1.0e-7);
+        for (&at_16k, &at_48k) in pcm_16k.iter().zip(pcm_48k.iter().step_by(3)) {
+            assert!((at_16k - at_48k).abs() < 1.0e-7);
         }
 
         // Accumulate variant matches baseline + overwrite bit-for-bit at both 48 kHz and 16 kHz.
@@ -211,8 +211,8 @@ mod tests {
             deemphasis_channel_accumulate(&input, &mut acc_48k, 1, &mut mem_acc_48k);
         assert_eq!(acc_written_48k, 48);
         assert_eq!(mem_acc_48k.to_bits(), mem_48k.to_bits());
-        for k in 0..48 {
-            assert_eq!(acc_48k[k].to_bits(), (0.25_f32 + pcm_48k[k]).to_bits());
+        for (&acc, &pcm) in acc_48k.iter().zip(&pcm_48k) {
+            assert_eq!(acc.to_bits(), (0.25_f32 + pcm).to_bits());
         }
 
         let mut acc_16k = [-0.125_f32; 16];
@@ -221,8 +221,8 @@ mod tests {
             deemphasis_channel_accumulate(&input, &mut acc_16k, 3, &mut mem_acc_16k);
         assert_eq!(acc_written_16k, 16);
         assert_eq!(mem_acc_16k.to_bits(), mem_16k.to_bits());
-        for k in 0..16 {
-            assert_eq!(acc_16k[k].to_bits(), (-0.125_f32 + pcm_16k[k]).to_bits());
+        for (&acc, &pcm) in acc_16k.iter().zip(&pcm_16k) {
+            assert_eq!(acc.to_bits(), (-0.125_f32 + pcm).to_bits());
         }
         return;
     }

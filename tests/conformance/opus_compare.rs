@@ -20,6 +20,7 @@
 //! normalisation: "using a fixed normalization value means we're willing to accept slightly lower
 //! quality for lower sampling rates".
 
+use super::{count_f32, count_f64, nearest_f32};
 use std::f32::consts::PI;
 use std::ops::{Index, IndexMut, RangeInclusive};
 
@@ -210,7 +211,7 @@ pub fn compare(
     average_consecutive_frames(&mut spectrum_y, frames, compared_bins);
 
     let err = weighted_error(&spectrum_x, &spectrum_y, frames, params);
-    let q = (100.0 * (1.0 - 0.5 * (1.0 + err).ln() / QUALITY_ERROR_BASE.ln())) as f32;
+    let q = nearest_f32(100.0 * (1.0 - 0.5 * (1.0 + err).ln() / QUALITY_ERROR_BASE.ln()));
     return Ok(Quality { q, err });
 }
 
@@ -222,17 +223,17 @@ fn reference_signal(reference: &[i16], channels: usize) -> Vec<f32> {
     }
     return frames
         .iter()
-        .map(|&[left, right]| (0.5 * (f64::from(left) + f64::from(right))) as f32)
+        .map(|&[left, right]| nearest_f32(0.5 * (f64::from(left) + f64::from(right))))
         .collect();
 }
 
 /// `OPUS_COSF` and `OPUS_SINF`: the float argument is evaluated in double precision.
 fn cosf(x: f32) -> f32 {
-    return f64::from(x).cos() as f32;
+    return nearest_f32(f64::from(x).cos());
 }
 
 fn sinf(x: f32) -> f32 {
-    return f64::from(x).sin() as f32;
+    return nearest_f32(f64::from(x).sin());
 }
 
 /// Cosine and sine tables of the DFT of a `window_sz` window, one contiguous row of
@@ -245,13 +246,13 @@ struct Twiddles {
 
 impl Twiddles {
     fn new(window_sz: usize, bins: usize) -> Self {
-        let step = 2.0 * PI / window_sz as f32;
-        let c: Vec<f32> = (0..window_sz).map(|i| cosf(step * i as f32)).collect();
-        let s: Vec<f32> = (0..window_sz).map(|i| sinf(step * i as f32)).collect();
+        let step = 2.0 * PI / count_f32(window_sz);
+        let c: Vec<f32> = (0..window_sz).map(|i| cosf(step * count_f32(i))).collect();
+        let s: Vec<f32> = (0..window_sz).map(|i| sinf(step * count_f32(i))).collect();
         let rows = |table: &[f32]| {
-            return (0..bins)
+            (0..bins)
                 .flat_map(|j| (0..window_sz).map(move |k| table[(j * k) % window_sz]))
-                .collect::<Vec<f32>>();
+                .collect::<Vec<f32>>()
         };
         return Self { window_sz, cos: rows(&c), sin: rows(&s) };
     }
@@ -260,12 +261,13 @@ impl Twiddles {
     /// `downsample`.
     fn bin(&self, j: usize, windowed: &[f32], downsample: f32) -> (f32, f32) {
         let row = j * self.window_sz..(j + 1) * self.window_sz;
-        let (re, im) = windowed.iter().zip(&self.cos[row.clone()]).zip(&self.sin[row]).fold(
-            (0.0f32, 0.0f32),
-            |(re, im), ((&sample, &c), &s)| {
-                return (re + c * sample, im - s * sample);
-            },
-        );
+        let (re, im) = windowed
+            .iter()
+            .zip(&self.cos[row.clone()])
+            .zip(&self.sin[row])
+            .fold((0.0f32, 0.0f32), |(re, im), ((&sample, &c), &s)| {
+                (re + c * sample, im - s * sample)
+            });
         return (re * downsample, im * downsample);
     }
 }
@@ -282,10 +284,11 @@ fn band_energy(
 ) {
     let Analysis { window_sz, step, downsample, nbands } = analysis;
     let channels = ps.channels;
-    let hann_step = 2.0 * PI / (window_sz - 1) as f32;
-    let window: Vec<f32> = (0..window_sz).map(|k| 0.5 - 0.5 * cosf(hann_step * k as f32)).collect();
+    let hann_step = 2.0 * PI / count_f32(window_sz - 1);
+    let window: Vec<f32> =
+        (0..window_sz).map(|k| 0.5 - 0.5 * cosf(hann_step * count_f32(k))).collect();
     let twiddles = Twiddles::new(window_sz, BANDS[nbands]);
-    let scale = downsample as f32;
+    let scale = count_f32(downsample);
     let mut x = vec![0.0f32; channels * window_sz];
     for i in 0..frames {
         for (ch, windowed) in x.chunks_exact_mut(window_sz).enumerate() {
@@ -307,7 +310,7 @@ fn band_energy(
             else {
                 continue;
             };
-            let width = (BANDS[band + 1] - BANDS[band]) as f32;
+            let width = count_f32(BANDS[band + 1] - BANDS[band]);
             p.iter().take(channels).enumerate().for_each(|(ch, &power)| {
                 out[(i * nbands + band) * channels + ch] = power / width;
             });
@@ -381,7 +384,7 @@ fn average_consecutive_frames(spectrum: &mut Spectrum, frames: usize, bins: usiz
 /// stored as float), attenuated around the SILK/CELT cross-over.
 fn bin_error(ratio: f32, j: usize) -> f32 {
     let ratio = f64::from(ratio);
-    let mut im = (ratio - ratio.ln() - 1.0) as f32;
+    let mut im = nearest_f32(ratio - ratio.ln() - 1.0);
     if CROSSOVER_BINS.contains(&j) {
         im *= CROSSOVER_WEIGHT;
     }
@@ -407,14 +410,14 @@ fn weighted_error(
                 .flat_map(|j| (0..channels).map(move |ch| (j, ch)))
                 .fold(0.0f64, |eb, (j, ch)| {
                     let ratio = spectrum_y[(i, j, ch)] / spectrum_x[(i, j, ch)];
-                    return eb + f64::from(bin_error(ratio, j));
+                    eb + f64::from(bin_error(ratio, j))
                 });
-            let eb = eb / ((BANDS[band + 1] - BANDS[band]) * channels) as f64;
-            return ef + eb * eb;
+            let eb = eb / count_f64((BANDS[band + 1] - BANDS[band]) * channels);
+            ef + eb * eb
         });
-        let ef = ef / NBANDS as f64;
+        let ef = ef / count_f64(NBANDS);
         let ef = ef * ef;
-        return err + ef * ef;
+        err + ef * ef
     });
-    return (total / frames as f64).powf(1.0 / ERROR_ROOT);
+    return (total / count_f64(frames)).powf(1.0 / ERROR_ROOT);
 }

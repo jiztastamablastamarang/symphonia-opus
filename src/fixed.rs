@@ -21,14 +21,6 @@
 //!   div_q(a, b, q)            i32, i32          (a << q) / b, about 16 significant bits
 //! ```
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::convert::{BoundedFrom, wrap_i16, wrap_i32};
 
 /// Multiplies a 32-bit value by a 16-bit value and drops 16 fractional bits: `(a * b) >> 16`.

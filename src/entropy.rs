@@ -28,14 +28,6 @@
 //!                             and Raw Bits Data
 //! ```
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::convert::BoundedFrom;
 use symphonia_core::errors::{Error, Result};
 

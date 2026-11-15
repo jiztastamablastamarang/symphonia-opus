@@ -1,14 +1,6 @@
 //! CELT packet loss concealment helpers: LPC analysis, FIR/IIR filtering, and pitch search
 //! ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use std::ops::Range;
 
 use crate::celt::constant::{CELT_WINDOW, EBANDS, band_width};
@@ -841,8 +833,8 @@ mod tests {
         assert_f32_slice_close(&fir_out[..16], &FIR_OUT16_RECORDED, 1.0e-5, 5.0e-4);
 
         let mut iir_mem = [0.0f32; LPC_ORDER];
-        for i in 0..LPC_ORDER {
-            iir_mem[i] = sig[LPC_ORDER - 1 - i];
+        for (mem, &sample) in iir_mem.iter_mut().zip(sig[..LPC_ORDER].iter().rev()) {
+            *mem = sample;
         }
         let mut iir_out = [0.0f32; 64];
         iir_filter(&fir_out, &lpc, &mut iir_out, &mut iir_mem);
@@ -852,10 +844,10 @@ mod tests {
         // Verify PLC pitch search on a 200-sample periodic stereo history (harmonics at 200, 400, 600)
         let mut decode_mem0 = [0.0f32; DECODE_BUFFER_SIZE];
         let mut decode_mem1 = [0.0f32; DECODE_BUFFER_SIZE];
-        for i in 0..DECODE_BUFFER_SIZE {
+        for (i, (mem0, mem1)) in decode_mem0.iter_mut().zip(&mut decode_mem1).enumerate() {
             let phase = 2.0 * std::f32::consts::PI * i.exact_f32() / 200.0;
-            decode_mem0[i] = phase.sin() * 500.0 + 0.3 * (2.0 * phase).sin() * 500.0;
-            decode_mem1[i] = decode_mem0[i] * 0.8;
+            *mem0 = phase.sin() * 500.0 + 0.3 * (2.0 * phase).sin() * 500.0;
+            *mem1 = *mem0 * 0.8;
         }
         let history_refs: [&[f32]; 2] = [&decode_mem0, &decode_mem1];
         let pitch_period = estimate_pitch_period(&history_refs);
@@ -866,15 +858,15 @@ mod tests {
         );
 
         // Verify unique fundamental pitch period (400 samples, since 2 * 400 = 800 > 720)
-        for i in 0..DECODE_BUFFER_SIZE {
+        for (i, (mem0, mem1)) in decode_mem0.iter_mut().zip(&mut decode_mem1).enumerate() {
             let phase = 2.0 * std::f32::consts::PI * i.exact_f32() / 400.0;
-            decode_mem0[i] = (phase.sin()
+            *mem0 = (phase.sin()
                 + 0.7 * (2.0 * phase).cos()
                 + 0.5 * (3.0 * phase).sin()
                 + 0.4 * (4.0 * phase).cos()
                 + 0.3 * (5.0 * phase).sin())
                 * 300.0;
-            decode_mem1[i] = decode_mem0[i];
+            *mem1 = *mem0;
         }
         let history_refs_400: [&[f32]; 2] = [&decode_mem0, &decode_mem1];
         let pitch_period_400 = estimate_pitch_period(&history_refs_400);

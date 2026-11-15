@@ -19,14 +19,6 @@
 //! `wrap_i16` and `wrap_i32` are the `(opus_int16)` and `(opus_int32)` narrowings of the RFC 6716
 //! Appendix A fixed-point macros; a bit-exact SILK decoder must reproduce them.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 /// Lossless conversion of a value whose range the caller guarantees.
 ///
 /// Debug builds assert that the value fits. Release builds clamp to the nearest bound of the

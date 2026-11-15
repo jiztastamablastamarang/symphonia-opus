@@ -5,14 +5,6 @@
 //! The tables are grouped by the decoding stage that reads them (`header`, `gain`, `lsf`, `ltp`,
 //! `excitation`, `resampler`, `plc`) and re-exported at this module's root.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 // The codebooks and filter tables are lookup tables read by index.
 
 pub(crate) use self::excitation::*;
@@ -2676,14 +2668,13 @@ mod tests {
         assert_eq!(Q12_COSINE_TABLE_FOR_LSF_CONVERSION[64], 0);
         assert_eq!(Q12_COSINE_TABLE_FOR_LSF_CONVERSION[128], -4096);
 
-        for i in 0..128 {
-            assert!(
-                Q12_COSINE_TABLE_FOR_LSF_CONVERSION[i] > Q12_COSINE_TABLE_FOR_LSF_CONVERSION[i + 1],
-                "Q12 cosine table must strictly decrease at index {i}"
-            );
+        let table = &Q12_COSINE_TABLE_FOR_LSF_CONVERSION;
+        for (i, &[current, next]) in table.array_windows::<2>().enumerate() {
+            assert!(current > next, "Q12 cosine table must strictly decrease at index {i}");
+        }
+        for (i, (&low, &high)) in table.iter().zip(table.iter().rev()).enumerate() {
             assert_eq!(
-                Q12_COSINE_TABLE_FOR_LSF_CONVERSION[i],
-                -Q12_COSINE_TABLE_FOR_LSF_CONVERSION[128 - i],
+                low, -high,
                 "Q12 cosine table must be antisymmetric around index 64 (at {i})"
             );
         }

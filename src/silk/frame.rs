@@ -4,14 +4,6 @@
 //! ([RFC 6716 Section 4.2.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.2>) to
 //! [Section 4.2.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use crate::silk::error::Error;
 use crate::silk::{
     LTP_ORDER, MAX_FRAME_SAMPLES, MAX_LPC_ORDER, MAX_SHELL_BLOCKS, MAX_SILK_FRAMES, MAX_SUBFRAMES,

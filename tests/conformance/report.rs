@@ -85,7 +85,7 @@ pub(crate) fn check_vector(dir: &Path, vector: usize, rate: u32, layout: Layout)
     let quality = REFERENCE_SETS.map(|(_, suffix)| {
         let reference =
             read_pcm16(&read_file(&dir.join(format!("testvector{vector:02}{suffix}.dec"))));
-        return opus_compare::compare(&reference, &decoded.pcm, layout.channels(), rate);
+        opus_compare::compare(&reference, &decoded.pcm, layout.channels(), rate)
     });
     return VectorReport { vector, rate, layout, decoded, quality };
 }
@@ -99,19 +99,19 @@ pub(crate) fn assert_conformance(rate: u32, layout: Layout) {
         let handles: Vec<_> = (0..workers)
             .map(|i| {
                 let dir = dir.as_path();
-                return scope.spawn(move || {
-                    return (1..=TEST_VECTOR_COUNT)
+                scope.spawn(move || {
+                    (1..=TEST_VECTOR_COUNT)
                         .skip(i)
                         .step_by(workers)
                         .map(|vector| check_vector(dir, vector, rate, layout))
-                        .collect::<Vec<_>>();
-                });
+                        .collect::<Vec<_>>()
+                })
             })
             .collect();
-        return handles
+        handles
             .into_iter()
             .flat_map(|handle| handle.join().expect("test vector worker panicked"))
-            .collect();
+            .collect()
     });
     reports.sort_by_key(|report| report.vector);
 

@@ -7,14 +7,6 @@
 //! batches of at most `RESAMPLER_MAX_BATCH_SIZE_MS` so that the stack buffers stay bounded
 //! ([RFC 8251 Section 5](<https://datatracker.ietf.org/doc/html/rfc8251#section-5>)).
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::convert::BoundedFrom;

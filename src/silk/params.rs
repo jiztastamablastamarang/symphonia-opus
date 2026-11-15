@@ -9,14 +9,6 @@
 //! Parameters coded relative to the previous frame of the same channel read and update
 //! [`CodingReferences`]; everything else is a pure function of the range decoder.
 
-#![warn(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-
 use symphonia_core::errors::Result;
 
 use crate::convert::BoundedFrom;
