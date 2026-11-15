@@ -130,7 +130,7 @@ impl OutputFormat {
         let sample_rate = match params.sample_rate {
             Some(hz) => SampleRate::try_from(hz).unwrap_or_else(|_| {
                 log::warn!("opus: declared sample rate {hz} Hz is not an Opus output rate, decoding at 48 kHz");
-                return SampleRate::Hz48000;
+                SampleRate::Hz48000
             }),
             None => SampleRate::Hz48000,
         };
@@ -503,6 +503,7 @@ mod tests {
     // vectors by `tests/rfc6716_conformance.rs`; the concealment steps are regression pins for
     // behaviour that RFC 6716 Section 4.4 leaves to the implementation.
     use super::*;
+    use crate::convert::{BoundedFrom, nearest_f32, trunc_saturating_i16};
     use crate::header::test_support::OpusHeadBuilder;
     use crate::test_vectors::*;
     use symphonia_core::audio::{Audio, Channels, Position};
@@ -551,7 +552,9 @@ mod tests {
     }
 
     fn quantize_i16_24(slice: &[f32]) -> [i16; 24] {
-        return std::array::from_fn(|i| (slice[i] * 32768.0).round() as i16);
+        return std::array::from_fn(|i| {
+            trunc_saturating_i16(f64::from((slice[i] * 32768.0).round()))
+        });
     }
 
     /// Checks an output plane of `samples` samples against its recorded head, tail and RMS.
@@ -578,8 +581,8 @@ mod tests {
                 "tail sample {i} mismatch: actual={actual}, expected={exp}, diff={diff}, tol={tol}"
             );
         }
-        let rms = (plane.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>() / (samples as f64))
-            .sqrt() as f32;
+        let energy = plane.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>();
+        let rms = nearest_f32((energy / f64::from(u32::bounded_from(samples))).sqrt());
         let expected_rms = recorded.rms;
         let rms_diff = (rms - expected_rms).abs();
         assert!(

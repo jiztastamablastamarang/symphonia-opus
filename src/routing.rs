@@ -48,7 +48,7 @@ impl<'a> Iterator for StreamPackets<'a> {
         let parsed = FramePacket::parse_self_delimited(self.data).map_err(SymphoniaError::from);
         return Some(parsed.map(|(packet, consumed)| {
             self.data = &self.data[consumed..];
-            return packet;
+            packet
         }));
     }
 }
@@ -238,7 +238,7 @@ mod tests {
             .decode_stream(0, 4, None, &mut swapped, |planes| {
                 planes.left.copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
                 planes.right.unwrap().copy_from_slice(&[-1.0, -2.0, -3.0, -4.0]);
-                return Ok(4);
+                Ok(4)
             })
             .unwrap();
         assert_eq!(swapped.plane(0).unwrap(), &[-2.0, -4.0, -6.0, -8.0]);
@@ -251,7 +251,7 @@ mod tests {
             .decode_stream(0, 3, None, &mut duplicated, |planes| {
                 planes.left.copy_from_slice(&[2.0, 4.0, 6.0]);
                 assert!(planes.right.is_none());
-                return Ok(3);
+                Ok(3)
             })
             .unwrap();
         assert_eq!(duplicated.plane(0).unwrap(), &[1.0, 2.0, 3.0]);
@@ -269,7 +269,7 @@ mod tests {
             .decode_stream(0, 3, Some(&mut scratch), &mut buf, |planes| {
                 planes.left.copy_from_slice(&[0.25, 0.5, 0.75]);
                 planes.right.unwrap().copy_from_slice(&[9.0, 9.0, 9.0]);
-                return Ok(3);
+                Ok(3)
             })
             .unwrap();
         assert_eq!(buf.plane(0).unwrap(), &[0.25, 0.5, 0.75]);

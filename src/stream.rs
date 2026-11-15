@@ -39,6 +39,7 @@ use crate::celt;
 use crate::celt::BlockSize;
 use crate::celt::constant::CELT_WINDOW;
 use crate::celt::decoder::{FrameInput, FrameLayout, Mix};
+use crate::convert::BoundedFrom;
 use crate::entropy;
 use crate::layout::Layout;
 use crate::packet::FramePacket;
@@ -93,7 +94,7 @@ const HYBRID_REDUNDANCY_LEN_RADIX: u32 = 256;
 const HYBRID_REDUNDANCY_MIN_BYTES: usize = 2;
 
 /// Bits per byte, in the `i32` domain of [`entropy::Decoder::tell`].
-const BITS_PER_BYTE: i32 = u8::BITS as i32;
+const BITS_PER_BYTE: i32 = u8::BITS.cast_signed();
 
 /// Which operand of a 5 ms cross-lap the rising CELT window favours
 /// ([RFC 6716 Section 4.5.1.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.1.4>)).
@@ -172,13 +173,15 @@ const fn celt_mix(mode: AudioMode) -> Mix {
 }
 
 /// Bit count of `bytes` whole bytes, in the `i32` domain of [`entropy::Decoder::tell`].
-const fn bits_in(bytes: usize) -> i32 {
-    return (bytes as i32) * BITS_PER_BYTE;
+fn bits_in(bytes: usize) -> i32 {
+    // Frames hold at most 1275 bytes (RFC 6716 rule R2).
+    return i32::bounded_from(bytes) * BITS_PER_BYTE;
 }
 
 /// Whole bytes that hold `bits` bits, rounded up to the next byte boundary.
-const fn whole_bytes(bits: i32) -> usize {
-    return (bits as u32).div_ceil(u8::BITS) as usize;
+fn whole_bytes(bits: i32) -> usize {
+    // Bit counts from `tell` are positive.
+    return usize::bounded_from(u32::bounded_from(bits).div_ceil(u8::BITS));
 }
 
 /// TOC configuration shared by every frame of a packet
@@ -285,18 +288,20 @@ impl<'a> FramePayload<'a> {
         let explicit_len = explicit
             .then(|| range_decoder.decode_uint(HYBRID_REDUNDANCY_LEN_RADIX))
             .transpose()?
-            .map(|len| (len as usize) + HYBRID_REDUNDANCY_MIN_BYTES);
+            .map(|len| usize::bounded_from(len) + HYBRID_REDUNDANCY_MIN_BYTES);
         let redundant_len = explicit_len
             .unwrap_or_else(|| bytes.len().saturating_sub(whole_bytes(range_decoder.tell())));
 
-        let active_len = bytes.len().saturating_sub(redundant_len);
-        if bits_in(active_len) < range_decoder.tell() {
-            return Ok(Self::without_redundancy(&bytes[..0]));
-        }
+        // A redundant frame longer than the frame, or one that leaves fewer active bytes than
+        // the range decoder has already read, invalidates the frame.
+        let split =
+            bytes.len().checked_sub(redundant_len).map(|active_len| bytes.split_at(active_len));
+        let Some((active, redundant)) =
+            split.filter(|(active, _)| bits_in(active.len()) >= range_decoder.tell())
+        else {
+            return Ok(Self::without_redundancy(&[]));
+        };
         range_decoder.shrink_storage(redundant_len);
-
-        let active = &bytes[..active_len];
-        let redundant = &bytes[active_len..(active_len + redundant_len)];
         let wrap = if at_start { Redundancy::CeltToSilk } else { Redundancy::SilkToCelt };
         let redundancy = wrap(redundant);
         return Ok(Self { active, redundancy });
@@ -440,7 +445,7 @@ impl StreamDecoder {
                 config,
                 out.range(offset..(offset + samples_per_frame)),
             )?;
-            return Ok(offset + written);
+            Ok(offset + written)
         });
     }
 
@@ -466,9 +471,9 @@ impl StreamDecoder {
         if samples <= f20 {
             return self.conceal_up_to_20ms(duration, out);
         }
-        for offset in (0..samples).step_by(f20) {
-            let step = f20.min(samples - offset);
-            self.conceal_up_to_20ms(FrameDuration::Ms20, out.range(offset..(offset + step)))?;
+        for start in (0..samples).step_by(f20) {
+            let step = start..(start + f20).min(samples);
+            self.conceal_up_to_20ms(FrameDuration::Ms20, out.range(step))?;
         }
         return Ok(samples);
     }

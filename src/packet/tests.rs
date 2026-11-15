@@ -1,6 +1,7 @@
 //! Tests of [`crate::packet`].
 
 use super::*;
+use crate::convert::BoundedFrom;
 
 struct Packet {
     toc_byte: u8,
@@ -66,7 +67,7 @@ impl Packet {
                 data.push(255u8);
                 remaining_padding -= MAX_PADDING_VALUE as usize;
             }
-            data.push(remaining_padding as u8);
+            data.push(u8::bounded_from(remaining_padding));
         }
 
         if self.vbr {
@@ -74,7 +75,7 @@ impl Packet {
             for frame in self.frames.iter().take(self.frames.len().saturating_sub(1)) {
                 let frame_len = frame.len();
                 assert!(frame_len < 252, "Frame length too long for test builder (max 251)");
-                data.push(frame_len as u8);
+                data.push(u8::bounded_from(frame_len));
             }
         }
         for frame in self.frames {
@@ -124,7 +125,7 @@ fn two_different_frames_packet() {
 
     let frame_1_len = frame_1.len();
     assert!(frame_1_len < 252, "Frame length too long for test builder (max 251)");
-    let frame_1_len_byte = [frame_1_len as u8];
+    let frame_1_len_byte = [u8::bounded_from(frame_1_len)];
 
     let data = Packet::new(toc_byte)
         .add_frame(&frame_1_len_byte)

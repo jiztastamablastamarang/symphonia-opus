@@ -17,6 +17,8 @@
 //!   3      M        M - 1 (VBR) or none (CBR)            1 more (VBR) or 1 (CBR)
 //! ```
 
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
+
 use std::num::NonZeroU8;
 use std::ops::Deref;
 use std::time::Duration;
@@ -137,7 +139,8 @@ impl<'a> Frames<'a> {
     /// The frames in packet order.
     #[inline]
     pub(crate) fn as_slice(&self) -> &[&'a [u8]] {
-        return &self.slots[..self.len];
+        // `push` never lets `len` pass the number of slots.
+        return self.slots.get(..self.len).unwrap_or_default();
     }
 }
 
@@ -421,7 +424,7 @@ fn take_equal_frames<'a>(
 ) -> Result<Frames<'a>, Error> {
     return (0..count).try_fold(Frames::new(), |mut frames, _| {
         frames.push(take_frame(cursor, len)?)?;
-        return Ok(frames);
+        Ok(frames)
     });
 }
 
@@ -450,10 +453,11 @@ fn take_length(cursor: &mut &[u8]) -> Result<usize, Error> {
 /// terminates
 /// ([RFC 6716 Section 3.2.5](<https://datatracker.ietf.org/doc/html/rfc6716#section-3.2.5>)).
 fn take_padding_length(cursor: &mut &[u8]) -> Result<usize, Error> {
-    let terminator = cursor.iter().position(|&b| b != u8::MAX).ok_or(Error::TooShort)?;
-    let total = terminator * usize::from(MAX_PADDING_VALUE) + usize::from(cursor[terminator]);
-    *cursor = &cursor[terminator + 1..];
-    return Ok(total);
+    let continuations = cursor.iter().take_while(|&&b| b == u8::MAX).count();
+    let (&last, rest) =
+        cursor.get(continuations..).and_then(<[u8]>::split_first).ok_or(Error::TooShort)?;
+    *cursor = rest;
+    return Ok(continuations * usize::from(MAX_PADDING_VALUE) + usize::from(last));
 }
 
 /// Takes the next `len` bytes as one frame.

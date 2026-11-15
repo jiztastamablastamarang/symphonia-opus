@@ -29,9 +29,13 @@
 //!     Figure 1: Example Packet Organization for a Logical Ogg Opus Stream
 //! ```
 
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
+
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::errors::Error as SymphoniaError;
 use symphonia_core::io::ReadBytes;
+
+use crate::convert::nearest_f32;
 
 use thiserror::Error;
 
@@ -242,10 +246,15 @@ impl IdentificationHeader {
         ];
 
         let count = usize::from(self.channel_count);
-        return match (&self.channel_mapping, count) {
-            (Rtp, 1..=2) | (Vorbis(_), 1..=8) => Channels::Positioned(VORBIS_POSITIONS[count - 1]),
-            _ => Channels::Discrete(u16::from(self.channel_count)),
+        let positions = match (&self.channel_mapping, count) {
+            (Rtp, 1..=2) | (Vorbis(_), 1..=8) => {
+                count.checked_sub(1).and_then(|i| VORBIS_POSITIONS.get(i))
+            }
+            _ => None,
         };
+        return positions.map_or(Channels::Discrete(u16::from(self.channel_count)), |&positions| {
+            Channels::Positioned(positions)
+        });
     }
 
     /// Reads the 8-byte magic signature and rejects anything other than `OpusHead`.
@@ -294,7 +303,7 @@ impl OutputGain {
     pub(crate) fn scale(self) -> Option<f32> {
         let gain_db = f64::from(self.0) / OUTPUT_GAIN_UNITS_PER_DB;
         return (self != Self::UNITY)
-            .then(|| 10.0_f64.powf(gain_db / DB_PER_AMPLITUDE_DECADE) as f32);
+            .then(|| nearest_f32(10.0_f64.powf(gain_db / DB_PER_AMPLITUDE_DECADE)));
     }
 }
 
@@ -431,8 +440,8 @@ pub(crate) mod test_support {
             };
         }
 
-        pub(crate) fn magic(mut self, magic: &[u8; 8]) -> Self {
-            self.magic = *magic;
+        pub(crate) fn magic(mut self, magic: [u8; 8]) -> Self {
+            self.magic = magic;
             return self;
         }
 
@@ -538,7 +547,7 @@ mod tests {
 
     #[test]
     fn invalid_magic_signature() {
-        let result = parse(&OpusHeadBuilder::new().magic(b"OpusHeas").build());
+        let result = parse(&OpusHeadBuilder::new().magic(*b"OpusHeas").build());
         assert!(matches!(result, Err(Error::InvalidMagicSignature)));
     }
 

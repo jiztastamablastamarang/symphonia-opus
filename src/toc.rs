@@ -14,6 +14,8 @@
 //!                           Figure 1: The TOC Byte
 //! ```
 
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
+
 use std::time::Duration;
 
 /// Number of bits the configuration number is shifted left by inside the byte.
@@ -83,7 +85,7 @@ pub(crate) struct Config(u8);
 impl Config {
     /// The configuration number itself, the row of Table 2
     /// ([RFC 6716 Section 3.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-3.1>)).
-    #[inline]
+    #[cfg(test)]
     pub(crate) const fn number(self) -> u8 {
         return self.0;
     }
@@ -92,21 +94,29 @@ impl Config {
     /// ([RFC 6716 Section 3.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-3.1>)).
     #[inline]
     pub(crate) fn audio_mode(self) -> AudioMode {
-        return CONFIG_TABLE[self.number() as usize].0;
+        return self.row().0;
     }
 
     /// The audio bandwidth of this configuration, from Table 2
     /// ([RFC 6716 Section 3.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-3.1>)).
     #[inline]
     pub(crate) fn bandwidth(self) -> Bandwidth {
-        return CONFIG_TABLE[self.number() as usize].1;
+        return self.row().1;
     }
 
     /// The frame duration of this configuration, from Table 2
     /// ([RFC 6716 Section 3.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-3.1>)).
     #[inline]
     pub(crate) fn frame_duration(self) -> FrameDuration {
-        return CONFIG_TABLE[self.number() as usize].2;
+        return self.row().2;
+    }
+
+    /// The row of Table 2. A configuration holds the five high bits of the TOC byte, so its
+    /// number always selects one of the 32 rows.
+    #[inline]
+    fn row(self) -> (AudioMode, Bandwidth, FrameDuration) {
+        debug_assert!(usize::from(self.0) < CONFIG_TABLE.len());
+        return CONFIG_TABLE.get(usize::from(self.0)).copied().unwrap_or(CONFIG_TABLE[0]);
     }
 }
 
