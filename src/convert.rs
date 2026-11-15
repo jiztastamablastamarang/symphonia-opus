@@ -92,7 +92,6 @@ bounded_from_unsigned! {
 
 /// Keeps the low 16 bits of `a` as a two's-complement value: the `(opus_int16)` narrowing of the
 /// RFC 6716 Appendix A fixed-point macros (for example the 16-bit operand of `silk_SMULWB`).
-#[cfg_attr(not(test), expect(dead_code, reason = "first used by a later module conversion"))]
 #[inline(always)]
 #[expect(clippy::cast_possible_truncation, reason = "the RFC reference narrows by truncation")]
 pub(crate) const fn wrap_i16(a: i32) -> i16 {

@@ -7,10 +7,20 @@
 //! and LPC synthesis, unmixes the adaptive mid-side representation into left and right, and
 //! resamples the result into `f32` output.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
+use crate::convert::{BoundedFrom, wrap_i16};
 use crate::fixed::{
-    div_q, mul_add_q16_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift, saturate_i16,
+    div_q, mul_add_q16_i16, mul_low_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift,
+    saturate_i16,
 };
 use crate::silk::error::Error;
 use crate::silk::lpc::{lpc_synthesize_q14, ltp_predict_q13};
@@ -74,57 +84,44 @@ const MID_TO_Q11_SHIFT: u32 = 11;
 /// Right shift turning the Q8 side prediction back into PCM (RFC 6716 Section 4.2.8).
 const SIDE_Q8_TO_PCM_SHIFT: u32 = 8;
 
-/// Fixed-order (`10` or `16`) LPC analysis (whitening) filter kernel.
+/// Fixed-order (`10` or `16`) LPC analysis (whitening) filter kernel: output sample `k` is the
+/// residual of `input[k]` after predicting it from the `ORDER` samples before it.
 #[inline]
-fn lpc_analysis_order<const ORDER: usize>(
-    out: &mut [i16],
-    input: &[i16],
-    a_q12: &[i16; ORDER],
-    len: usize,
-) {
-    let a_rev: [i16; ORDER] = std::array::from_fn(|k| a_q12[ORDER - 1 - k]);
-    out[..ORDER].fill(0);
-    for (k, out_sample) in out[ORDER..len].iter_mut().enumerate() {
-        let window = &input[k..k + ORDER + 1];
-        let prediction_q12 = window[..ORDER]
-            .iter()
-            .zip(a_rev.iter())
-            .fold(0i32, |acc, (&sample, &tap)| acc.wrapping_add((sample as i32) * (tap as i32)));
+fn lpc_analysis_order<const ORDER: usize>(out: &mut [i16], input: &[i16], a_q12: &[i16; ORDER]) {
+    let mut a_rev = *a_q12;
+    a_rev.reverse();
+    let Some((head, body)) = out.split_at_mut_checked(ORDER)
+    else {
+        return;
+    };
+    head.fill(0);
+    let targets = body.iter_mut().zip(input.iter().skip(ORDER));
+    for ((out_sample, &current), history) in targets.zip(input.array_windows::<ORDER>()) {
+        let prediction_q12 = history.iter().zip(&a_rev).fold(0i32, |acc, (&sample, &tap)| {
+            acc.wrapping_add(i32::from(sample) * i32::from(tap))
+        });
         let residual_q12 =
-            ((window[ORDER] as i32) << LPC_ANALYSIS_Q12_SHIFT).wrapping_sub(prediction_q12);
+            (i32::from(current) << LPC_ANALYSIS_Q12_SHIFT).wrapping_sub(prediction_q12);
         *out_sample = saturate_i16(round_shift(residual_q12, LPC_ANALYSIS_Q12_SHIFT));
     }
+    return;
 }
 
 /// Runs the LPC analysis (whitening) filter with Q12 coefficients `a_q12` over `input`
 /// ([RFC 6716 Section 4.2.7.9.1](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.1>)).
 ///
-/// The first `a_q12.len()` output samples are set to zero.
+/// The first `a_q12.len()` output samples are set to zero. SILK filters have order 10 or 16
+/// ([`crate::silk::SilkLayout::lpc_order_for`]), and both callers pass more samples than taps.
 pub(crate) fn lpc_analysis_filter(out: &mut [i16], input: &[i16], a_q12: &[i16]) {
-    let order = a_q12.len();
     let len = out.len().min(input.len());
-    if len <= order || order == 0 {
-        out[..len].fill(0);
-        return;
+    debug_assert!(len > a_q12.len(), "{len} samples for {} taps", a_q12.len());
+    let (out, input) = (&mut out[..len], &input[..len]);
+    match (<&[i16; 10]>::try_from(a_q12), <&[i16; 16]>::try_from(a_q12)) {
+        (Ok(taps), _) => lpc_analysis_order(out, input, taps),
+        (_, Ok(taps)) => lpc_analysis_order(out, input, taps),
+        _ => debug_assert!(false, "SILK LPC order is 10 or 16, not {}", a_q12.len()),
     }
-    if let Ok(taps) = <&[i16; 10]>::try_from(a_q12) {
-        lpc_analysis_order::<10>(out, input, taps, len);
-        return;
-    }
-    if let Ok(taps) = <&[i16; 16]>::try_from(a_q12) {
-        lpc_analysis_order::<16>(out, input, taps, len);
-        return;
-    }
-
-    out[..order].fill(0);
-    for i in order..len {
-        let prediction_q12 = a_q12.iter().enumerate().fold(0i32, |acc, (j, &a_tap)| {
-            acc.wrapping_add((input[i - 1 - j] as i32) * (a_tap as i32))
-        });
-        let residual_q12 =
-            ((input[i] as i32) << LPC_ANALYSIS_Q12_SHIFT).wrapping_sub(prediction_q12);
-        out[i] = saturate_i16(round_shift(residual_q12, LPC_ANALYSIS_Q12_SHIFT));
-    }
+    return;
 }
 
 /// Per-subframe context shared across voiced LTP synthesis and rewhitening.
@@ -208,7 +205,7 @@ impl ChannelState {
 
         self.lpc_state_q14.copy_from_slice(&lpc_state_q14[..MAX_LPC_ORDER]);
         self.push_output_history(&frame.output_pcm[..frame_length]);
-        self.prev_pitch_lag = frame.subframes[subframes - 1].pitch_lag as i32;
+        self.prev_pitch_lag = i32::from(frame.subframes[subframes - 1].pitch_lag);
         return Ok(());
     }
 
@@ -258,7 +255,7 @@ impl ChannelState {
         }
 
         let b_q14: [i16; LTP_ORDER] =
-            std::array::from_fn(|j| (subframe.ltp_coeffs[j] as i16) << LTP_COEFF_Q7_TO_Q14_SHIFT);
+            subframe.ltp_coeffs.map(|coeff| i16::from(coeff) << LTP_COEFF_Q7_TO_Q14_SHIFT);
         predict_ltp_subframe(ltp_state_q15, state_end, lag, &b_q14, excitation_q14, residual_q14);
     }
 
@@ -340,17 +337,16 @@ pub(crate) fn unmix_mid_side_to_left_right(
         .copy_from_slice(&side[frame_length..frame_length + STEREO_HISTORY_SAMPLES]);
 
     let interp_samples = STEREO_INTERP_LEN_MS * sample_rate_khz;
-    let denom_q16 = UNIT_GAIN_Q16 / (interp_samples as i32);
+    // At most 8 ms at 16 kHz, 128 samples.
+    let denom_q16 = UNIT_GAIN_Q16 / i32::bounded_from(interp_samples);
     let [prev0_q13, prev1_q13] = stereo_state.prediction_prev_q13;
-    let delta0_q13 =
-        round_shift(((weights.w0_q13 - prev0_q13) as i16 as i32) * (denom_q16 as i16 as i32), 16);
-    let delta1_q13 =
-        round_shift(((weights.w1_q13 - prev1_q13) as i16 as i32) * (denom_q16 as i16 as i32), 16);
+    let delta0_q13 = round_shift(mul_low_i16(weights.w0_q13 - prev0_q13, denom_q16), 16);
+    let delta1_q13 = round_shift(mul_low_i16(weights.w1_q13 - prev1_q13, denom_q16), 16);
 
     let target_q13 = (weights.w0_q13, weights.w1_q13);
     let (mut pred0_q13, mut pred1_q13) = (prev0_q13, prev1_q13);
     for (i, (mid_window, side_out)) in mid[..frame_length + STEREO_HISTORY_SAMPLES]
-        .windows(3)
+        .array_windows::<3>()
         .zip(&mut side[1..=frame_length])
         .enumerate()
     {
@@ -359,13 +355,13 @@ pub(crate) fn unmix_mid_side_to_left_right(
             pred1_q13 += delta1_q13;
         }
         let (w0, w1) = if i < interp_samples { (pred0_q13, pred1_q13) } else { target_q13 };
-        *side_out = predict_side_sample(mid_window, *side_out, w0, w1);
+        *side_out = predict_side_sample(*mid_window, *side_out, w0, w1);
     }
     stereo_state.prediction_prev_q13 = [weights.w0_q13, weights.w1_q13];
 
     mid[1..=frame_length].iter_mut().zip(side[1..=frame_length].iter_mut()).for_each(
         |(mid_sample, side_sample)| {
-            let (mid_val, side_val) = (*mid_sample as i32, *side_sample as i32);
+            let (mid_val, side_val) = (i32::from(*mid_sample), i32::from(*side_sample));
             *mid_sample = saturate_i16(mid_val + side_val);
             *side_sample = saturate_i16(mid_val - side_val);
         },
@@ -376,13 +372,12 @@ pub(crate) fn unmix_mid_side_to_left_right(
 /// side sample; `mid_window` holds the mid samples around the predicted position
 /// ([RFC 6716 Section 4.2.8](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.8>)).
 #[inline]
-fn predict_side_sample(mid_window: &[i16], side: i16, pred0_q13: i32, pred1_q13: i32) -> i16 {
-    let sum_lpf_q11 = (((mid_window[0] as i32) + (mid_window[2] as i32))
-        + ((mid_window[1] as i32) << 1))
-        << MID_LPF_TO_Q11_SHIFT;
-    let sum_q8 = mul_add_q16_i16((side as i32) << SIDE_TO_Q8_SHIFT, sum_lpf_q11, pred0_q13 as i16);
+fn predict_side_sample(mid_window: [i16; 3], side: i16, pred0_q13: i32, pred1_q13: i32) -> i16 {
+    let [prev, mid, next] = mid_window.map(i32::from);
+    let sum_lpf_q11 = ((prev + next) + (mid << 1)) << MID_LPF_TO_Q11_SHIFT;
     let sum_q8 =
-        mul_add_q16_i16(sum_q8, (mid_window[1] as i32) << MID_TO_Q11_SHIFT, pred1_q13 as i16);
+        mul_add_q16_i16(i32::from(side) << SIDE_TO_Q8_SHIFT, sum_lpf_q11, wrap_i16(pred0_q13));
+    let sum_q8 = mul_add_q16_i16(sum_q8, mid << MID_TO_Q11_SHIFT, wrap_i16(pred1_q13));
     return saturate_i16(round_shift(sum_q8, SIDE_Q8_TO_PCM_SHIFT));
 }
 
@@ -415,7 +410,7 @@ pub(crate) fn resample_to_f32(
         return Err(Error::BufferOverflow.into());
     }
     out[..n_out].iter_mut().zip(resampled[..n_out].iter()).for_each(|(dst, &src)| {
-        *dst = (src as f32) * INT16_TO_F32_SCALE;
+        *dst = f32::from(src) * INT16_TO_F32_SCALE;
     });
     return Ok(n_out);
 }
@@ -444,11 +439,11 @@ mod tests {
 
         let mut x_mid = [0i16; 18];
         let mut x_side = [0i16; 18];
-        for i in 0..16 {
+        for (i, (mid, side)) in (0..16).zip(x_mid[2..].iter_mut().zip(&mut x_side[2..])) {
             let sign_m = if (i & 1) != 0 { -1 } else { 1 };
             let sign_s = if (i & 2) != 0 { 1 } else { -1 };
-            x_mid[i + 2] = ((i as i32 * 317 - 1200) * sign_m) as i16;
-            x_side[i + 2] = ((i as i32 * 193 - 500) * sign_s) as i16;
+            *mid = i16::bounded_from((i * 317 - 1200) * sign_m);
+            *side = i16::bounded_from((i * 193 - 500) * sign_s);
         }
         unmix_mid_side_to_left_right(
             &mut stereo,

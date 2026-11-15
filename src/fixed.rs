@@ -21,11 +21,13 @@
 //!   div_q(a, b, q)            i32, i32          (a << q) / b, about 16 significant bits
 //! ```
 
+use crate::convert::wrap_i16;
+
 /// Multiplies a 32-bit value by a 16-bit value and drops 16 fractional bits: `(a * b) >> 16`.
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn mul_q16_i16(a: i32, b: i16) -> i32 {
+pub(crate) fn mul_q16_i16(a: i32, b: i16) -> i32 {
     return (((a as i64) * (b as i64)) >> 16) as i32;
 }
 
@@ -34,7 +36,7 @@ pub(crate) const fn mul_q16_i16(a: i32, b: i16) -> i32 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn mul_add_q16_i16(acc: i32, a: i32, b: i16) -> i32 {
+pub(crate) fn mul_add_q16_i16(acc: i32, a: i32, b: i16) -> i32 {
     return acc.wrapping_add(mul_q16_i16(a, b));
 }
 
@@ -42,7 +44,7 @@ pub(crate) const fn mul_add_q16_i16(acc: i32, a: i32, b: i16) -> i32 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn mul_q16(a: i32, b: i32) -> i32 {
+pub(crate) fn mul_q16(a: i32, b: i32) -> i32 {
     return (((a as i64) * (b as i64)) >> 16) as i32;
 }
 
@@ -51,15 +53,23 @@ pub(crate) const fn mul_q16(a: i32, b: i32) -> i32 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn mul_add_q16(acc: i32, a: i32, b: i32) -> i32 {
+pub(crate) fn mul_add_q16(acc: i32, a: i32, b: i32) -> i32 {
     return acc.wrapping_add(mul_q16(a, b));
+}
+
+/// Multiplies the low 16 bits of `a` and `b` as signed values: `(i16)a * (i16)b`, the
+/// `silk_SMULBB` primitive of the RFC 6716 reference decoder, which narrows its operands by
+/// truncation.
+#[inline(always)]
+pub(crate) fn mul_low_i16(a: i32, b: i32) -> i32 {
+    return i32::from(wrap_i16(a)) * i32::from(wrap_i16(b));
 }
 
 /// Multiplies two 32-bit values and keeps the high word: `(a * b) >> 32`.
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn mul_high_i32(a: i32, b: i32) -> i32 {
+pub(crate) fn mul_high_i32(a: i32, b: i32) -> i32 {
     return (((a as i64) * (b as i64)) >> 32) as i32;
 }
 
@@ -68,7 +78,7 @@ pub(crate) const fn mul_high_i32(a: i32, b: i32) -> i32 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn round_shift(a: i32, shift: u32) -> i32 {
+pub(crate) fn round_shift(a: i32, shift: u32) -> i32 {
     if shift == 1 {
         return (a >> 1) + (a & 1);
     }
@@ -79,7 +89,7 @@ pub(crate) const fn round_shift(a: i32, shift: u32) -> i32 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn round_shift_i64(a: i64, shift: u32) -> i64 {
+pub(crate) fn round_shift_i64(a: i64, shift: u32) -> i64 {
     if shift == 1 {
         return (a >> 1) + (a & 1);
     }
@@ -90,7 +100,7 @@ pub(crate) const fn round_shift_i64(a: i64, shift: u32) -> i64 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn saturate_i16(a: i32) -> i16 {
+pub(crate) fn saturate_i16(a: i32) -> i16 {
     if a > i16::MAX as i32 {
         return i16::MAX;
     }
@@ -105,7 +115,7 @@ pub(crate) const fn saturate_i16(a: i32) -> i16 {
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
-pub(crate) const fn shl_saturating(a: i32, shift: u32) -> i32 {
+pub(crate) fn shl_saturating(a: i32, shift: u32) -> i32 {
     if shift >= 31 {
         if a > 0 {
             return i32::MAX;
@@ -128,7 +138,7 @@ pub(crate) const fn shl_saturating(a: i32, shift: u32) -> i32 {
 /// Compile-time constant left shift (`SHIFT < 31`) that saturates at the 32-bit signed bounds
 /// directly in 32-bit registers without widening to 64 bits.
 #[inline(always)]
-pub(crate) const fn shl_saturating_const<const SHIFT: u32>(a: i32) -> i32 {
+pub(crate) fn shl_saturating_const<const SHIFT: u32>(a: i32) -> i32 {
     const {
         assert!(SHIFT < 31);
     }
