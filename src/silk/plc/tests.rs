@@ -104,19 +104,20 @@ fn voiced_wb_concealment_of_3_losses_and_glue_regression_pin() {
     let mut frame = Frame::new(320, 4, 16);
     frame.frame_type = FrameType::new(SignalType::Voiced, QuantizationOffsetType::Low);
     frame.ltp_scale_q14 = 12_288;
-    for i in 0..4 {
-        frame.subframes[i].pitch_lag = PITCH_LAGS[i];
-        frame.subframes[i].ltp_coeffs = LTP_Q7[i];
-        frame.subframes[i].gain_q16 = GAINS_Q16[i];
-        frame.subframes[i].lpc_coeffs_q12 = A_Q12_WB;
+    let per_subframe = PITCH_LAGS.iter().zip(&LTP_Q7).zip(&GAINS_Q16);
+    for (subframe, ((&pitch_lag, &ltp_coeffs), &gain_q16)) in
+        frame.subframes.iter_mut().zip(per_subframe)
+    {
+        subframe.pitch_lag = pitch_lag;
+        subframe.ltp_coeffs = ltp_coeffs;
+        subframe.gain_q16 = gain_q16;
+        subframe.lpc_coeffs_q12 = A_Q12_WB;
     }
-    for i in 0..320 {
-        frame.exc_q14[i] = (((i as i32) * 173 + 29) % 2001 - 1000) * 16;
-        frame.output_pcm[i] = ((((i as i32) * 97 + 13) % 1601) - 800) as i16;
-        ch_state.output_history[i] = frame.output_pcm[i];
-    }
-    for (i, state) in ch_state.lpc_state_q14[..16].iter_mut().enumerate() {
-        *state = ((i as i32) - 8) * 12_345;
+    Sawtooth::new(173, 29, 2001).scaled(16).fill(&mut frame.exc_q14[..320]);
+    Sawtooth::new(97, 13, 1601).fill_pcm(&mut frame.output_pcm[..320]);
+    ch_state.output_history[..320].copy_from_slice(&frame.output_pcm[..320]);
+    for (state, level) in ch_state.lpc_state_q14[..16].iter_mut().zip(-8..) {
+        *state = level * 12_345;
     }
 
     let mut pcm_buf = frame.output_pcm;
@@ -153,9 +154,7 @@ fn voiced_wb_concealment_of_3_losses_and_glue_regression_pin() {
     );
 
     // Recovery frame with higher energy triggers glue_frames ramp
-    for (i, sample) in pcm_buf[..320].iter_mut().enumerate() {
-        *sample = ((((i as i32) * 311 + 50) % 8001) - 4000) as i16;
-    }
+    Sawtooth::new(311, 50, 8001).fill_pcm(&mut pcm_buf[..320]);
     record_decoded(&mut plc, &mut ch_state, &frame);
     cng.apply(&ch_state, &plc, Some(cng_input(&frame)), 16, &mut pcm_buf[..320]).unwrap();
     plc.glue_frames(&mut pcm_buf[..320]);
@@ -195,18 +194,18 @@ fn unvoiced_nb_concealment_of_3_losses_regression_pin() {
 
     let mut frame = Frame::new(160, 4, 10);
     frame.frame_type = FrameType::new(SignalType::Unvoiced, QuantizationOffsetType::High);
-    for (i, &gain) in GAINS_Q16.iter().enumerate() {
-        frame.subframes[i].gain_q16 = gain;
-        frame.subframes[i].lpc_coeffs_q12[..10].copy_from_slice(&A_Q12_NB);
+    for (subframe, &gain) in frame.subframes.iter_mut().zip(&GAINS_Q16) {
+        subframe.gain_q16 = gain;
+        subframe.lpc_coeffs_q12[..10].copy_from_slice(&A_Q12_NB);
     }
-    for i in 0..160 {
-        let scale = if (80..120).contains(&i) { 4 } else { 24 };
-        frame.exc_q14[i] = (((i as i32) * 251 + 43) % 1001 - 500) * scale;
-        frame.output_pcm[i] = ((((i as i32) * 67 + 19) % 801) - 400) as i16;
-        ch_state.output_history[i] = frame.output_pcm[i];
-    }
-    for (i, state) in ch_state.lpc_state_q14[..10].iter_mut().enumerate() {
-        *state = (5 - (i as i32)) * 8192;
+    // A quieter stretch in samples 80..120 between two louder ones.
+    let excitation = Sawtooth::new(251, 43, 1001);
+    excitation.scaled(24).fill(&mut frame.exc_q14[..160]);
+    excitation.scaled(4).fill_from(80, &mut frame.exc_q14[80..120]);
+    Sawtooth::new(67, 19, 801).fill_pcm(&mut frame.output_pcm[..160]);
+    ch_state.output_history[..160].copy_from_slice(&frame.output_pcm[..160]);
+    for (state, level) in ch_state.lpc_state_q14[..10].iter_mut().zip((-4..=5).rev()) {
+        *state = level * 8192;
     }
 
     let mut pcm_buf = [0i16; 160];

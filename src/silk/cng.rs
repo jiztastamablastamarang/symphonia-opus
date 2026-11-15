@@ -360,15 +360,13 @@ mod tests {
         let a_f0 = nlsf_to_lpc_q12(&NLSF_F0).unwrap();
         ch_state.references.prev_nlsf_q15[..10].copy_from_slice(&NLSF_F0);
         let gains_f0 = [655_360, 983_040, 786_432, 524_288];
-        for (i, &gain) in gains_f0.iter().enumerate() {
-            frame1.subframes[i].gain_q16 = gain;
-            frame1.subframes[i].lpc_coeffs_q12 = a_f0;
+        for (subframe, &gain) in frame1.subframes.iter_mut().zip(&gains_f0) {
+            subframe.gain_q16 = gain;
+            subframe.lpc_coeffs_q12 = a_f0;
         }
-        for i in 0..160 {
-            frame1.exc_q14[i] = (((i as i32) * 131 + 17) % 601 - 300) * 32;
-            frame1.output_pcm[i] = ((((i as i32) * 37 + 11) % 201) - 100) as i16;
-            ch_state.output_history[i] = frame1.output_pcm[i];
-        }
+        Sawtooth::new(131, 17, 601).scaled(32).fill(&mut frame1.exc_q14[..160]);
+        Sawtooth::new(37, 11, 201).fill_pcm(&mut frame1.output_pcm[..160]);
+        ch_state.output_history[..160].copy_from_slice(&frame1.output_pcm[..160]);
 
         let mut pcm_buf = [0i16; 160];
         pcm_buf.copy_from_slice(&frame1.output_pcm[..160]);
@@ -385,12 +383,10 @@ mod tests {
         // Inactive frame 2 (triggers -3 dB rapid gain adaptation)
         ch_state.references.prev_nlsf_q15[..10].copy_from_slice(&NLSF_F1);
         let gains_f1 = [262_144, 196_608, 327_680, 294_912];
-        for (i, &gain) in gains_f1.iter().enumerate() {
-            frame1.subframes[i].gain_q16 = gain;
+        for (subframe, &gain) in frame1.subframes.iter_mut().zip(&gains_f1) {
+            subframe.gain_q16 = gain;
         }
-        for (i, exc) in frame1.exc_q14[..160].iter_mut().enumerate() {
-            *exc = (((i as i32) * 193 + 7) % 501 - 250) * 28;
-        }
+        Sawtooth::new(193, 7, 501).scaled(28).fill(&mut frame1.exc_q14[..160]);
 
         record_decoded(&mut plc, &mut ch_state, &frame1);
         cng.apply(&ch_state, &plc, Some(cng_input(&frame1)), 10, &mut pcm_buf).unwrap();
@@ -460,9 +456,7 @@ mod tests {
             subframe.gain_q16 = 50_000_000;
             subframe.lpc_coeffs_q12 = a_wb;
         }
-        for (i, exc) in frame.exc_q14[..320].iter_mut().enumerate() {
-            *exc = (((i as i32) * 97 + 13) % 401 - 200) * 64;
-        }
+        Sawtooth::new(97, 13, 401).scaled(64).fill(&mut frame.exc_q14[..320]);
 
         let mut pcm_buf = [0i16; 320];
         record_decoded(&mut plc, &mut ch_state, &frame);

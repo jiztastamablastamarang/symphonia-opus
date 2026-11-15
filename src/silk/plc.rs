@@ -772,7 +772,58 @@ fn synthesise_lpc_frame(
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use crate::convert::BoundedFrom;
     use crate::silk::cng::CngFrameInput;
+
+    /// Deterministic zero-centred sawtooth used as synthetic decoder input by the regression
+    /// pins: sample `i` is `((i * step + phase) % modulus - modulus / 2) * scale`.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Sawtooth {
+        step: i32,
+        phase: i32,
+        modulus: i32,
+        scale: i32,
+    }
+
+    impl Sawtooth {
+        /// An unscaled sawtooth of `modulus` levels advancing `step` levels per sample.
+        pub(crate) const fn new(step: i32, phase: i32, modulus: i32) -> Self {
+            return Self { step, phase, modulus, scale: 1 };
+        }
+
+        /// The same sawtooth multiplied by `scale`.
+        pub(crate) const fn scaled(self, scale: i32) -> Self {
+            return Self { scale, ..self };
+        }
+
+        /// Sample `i` of the sawtooth.
+        pub(crate) const fn sample(self, i: i32) -> i32 {
+            return ((i * self.step + self.phase) % self.modulus - self.modulus / 2) * self.scale;
+        }
+
+        /// Fills `out` with samples `first, first + 1, ...`.
+        pub(crate) fn fill_from(self, first: i32, out: &mut [i32]) {
+            for (slot, i) in out.iter_mut().zip(first..) {
+                *slot = self.sample(i);
+            }
+            return;
+        }
+
+        /// Fills `out` with samples `0, 1, ...`.
+        pub(crate) fn fill(self, out: &mut [i32]) {
+            self.fill_from(0, out);
+            return;
+        }
+
+        /// Fills `out` with samples `0, 1, ...` as 16-bit PCM; every PCM sawtooth of the pins
+        /// stays within `-4000..=4000`.
+        pub(crate) fn fill_pcm(self, out: &mut [i16]) {
+            for (slot, i) in out.iter_mut().zip(0..) {
+                *slot = i16::bounded_from(self.sample(i));
+            }
+            return;
+        }
+    }
 
     /// Layout of a concealed frame of `frame_len` samples in `nb_subfr` subframes with an LPC
     /// filter of `lpc_order`.
