@@ -862,6 +862,39 @@ mod tests {
         return;
     }
 
+    /// Packet 0 of `testvector04.bit` (RFC 8251 test vectors): one 60 ms SILK wideband frame
+    /// (TOC configuration 11, code 0).
+    const SILK_WB_60MS_PKT: [u8; 38] = [
+        0x58, 0x03, 0x28, 0x2a, 0x16, 0x50, 0x39, 0xf0, 0xd1, 0x2b, 0xc8, 0x18, 0x3c, 0xfe, 0x30,
+        0x5d, 0x91, 0xe4, 0xee, 0xd5, 0x6e, 0x9c, 0x87, 0x6b, 0xff, 0x43, 0xbb, 0xff, 0x63, 0x82,
+        0x21, 0xc3, 0x83, 0x52, 0xf4, 0x95, 0x7d, 0x22,
+    ];
+
+    /// A loss after a 60 ms frame is concealed for the full 60 ms, in three 20 ms steps whose
+    /// energy decays as the SILK concealment attenuates.
+    #[test]
+    fn loss_after_a_60_ms_frame_is_concealed_in_attenuating_20_ms_steps() {
+        const SAMPLES_20MS: usize = 960;
+        let mut dec = decoder(&mono_params());
+        decode(&mut dec, &SILK_WB_60MS_PKT, 3 * SAMPLES_20MS);
+        assert_eq!(dec.buffer.frames(), 3 * SAMPLES_20MS);
+
+        dec.decode_lost_packet().unwrap();
+        assert_eq!(dec.buffer.frames(), 3 * SAMPLES_20MS);
+        let plane = dec.buffer.plane(0).unwrap();
+        assert!(plane.iter().all(|sample| sample.is_finite()));
+        let energies: Vec<f32> = plane
+            .as_chunks::<SAMPLES_20MS>()
+            .0
+            .iter()
+            .map(|step| step.iter().fold(0.0_f32, |acc, &sample| acc + sample * sample))
+            .collect();
+        assert_eq!(energies.len(), 3);
+        assert!(energies.iter().all(|&energy| energy > 0.0), "silent step: {energies:?}");
+        assert!(energies.is_sorted_by(|a, b| a >= b), "energy must not grow: {energies:?}");
+        return;
+    }
+
     /// RFC 6716 Appendix A (`opus_decode_frame`): a frame of one byte carries no payload and is
     /// decoded exactly like a lost frame, so its output must equal explicit loss concealment from
     /// the same state and its final range state must be zero.

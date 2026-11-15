@@ -896,6 +896,58 @@ mod tests {
         MODE_TRANSITIONS, MONO_WB, STEREO_MB,
     };
 
+    /// All-`0xFF` bytes keep the range decoder value at zero, so every binary flag decodes as `1`
+    /// and a uniform integer as its maximum: a Hybrid frame then signals a redundant CELT frame
+    /// of `255 + 2` bytes at its start.
+    static ALL_ONES: [u8; 300] = [0xFF; 300];
+
+    /// Redundant frame length that [`ALL_ONES`] signals in a Hybrid frame.
+    const ALL_ONES_HYBRID_REDUNDANCY: usize = 257;
+
+    fn split_all_ones(mode: AudioMode, len: usize) -> FramePayload<'static> {
+        let bytes = &ALL_ONES[..len];
+        let mut range_decoder = entropy::Decoder::new(bytes);
+        return FramePayload::split(mode, &mut range_decoder, bytes).unwrap();
+    }
+
+    #[test]
+    fn celt_only_and_short_frames_carry_no_redundancy() {
+        assert_eq!(
+            split_all_ones(AudioMode::Celt, 200),
+            FramePayload::without_redundancy(&ALL_ONES[..200])
+        );
+        // 1 bit used + 17 required > 16 bits available.
+        assert_eq!(
+            split_all_ones(AudioMode::Silk, 2),
+            FramePayload::without_redundancy(&ALL_ONES[..2])
+        );
+    }
+
+    #[test]
+    fn redundancy_longer_than_the_frame_leaves_nothing_active() {
+        let payload = split_all_ones(AudioMode::Hybrid, 200);
+        assert_eq!(payload, FramePayload::without_redundancy(&ALL_ONES[..0]));
+    }
+
+    #[test]
+    fn redundancy_leaving_fewer_bytes_than_decoded_leaves_nothing_active() {
+        let payload = split_all_ones(AudioMode::Hybrid, ALL_ONES_HYBRID_REDUNDANCY + 2);
+        assert_eq!(payload, FramePayload::without_redundancy(&ALL_ONES[..0]));
+    }
+
+    #[test]
+    fn redundancy_is_split_off_the_end_of_the_frame() {
+        let len = ALL_ONES_HYBRID_REDUNDANCY + 3;
+        let payload = split_all_ones(AudioMode::Hybrid, len);
+        assert_eq!(payload.active, &ALL_ONES[..3]);
+        assert_eq!(payload.redundancy, Redundancy::CeltToSilk(&ALL_ONES[3..len]));
+
+        // A SILK-only frame implies that every byte after the range-coded data is redundant.
+        let payload = split_all_ones(AudioMode::Silk, 20);
+        assert_eq!(payload.active, &ALL_ONES[..1]);
+        assert_eq!(payload.redundancy, Redundancy::CeltToSilk(&ALL_ONES[1..20]));
+    }
+
     #[test]
     fn decode_and_conceal_overwrite_uninitialized_planes_across_all_modes() {
         let mut out = [[f32::NAN; MAX_PACKET_SAMPLES_48K]; 2];
