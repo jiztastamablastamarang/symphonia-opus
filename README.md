@@ -593,7 +593,7 @@ Summary across all 5 output sample rates (120 runs total):
 
 ### 8.3 Running the Tests
 
-The 150 self-contained unit tests require no external files:
+The 160 self-contained unit tests require no external files:
 
 ```bash
 cargo test
@@ -626,38 +626,38 @@ cargo test --release --test rfc6716_conformance -- --ignored --nocapture
 
 ### 9.2 Full-Corpus Throughput vs `libopus 1.6.1` (`320.6s` Audio, All 12 RFC 8251 Vectors)
 
-Measured on a single pinned core (`taskset -c 2`, Intel Xeon E5-2650 v2, median of 21 full-corpus passes per configuration across `testvector01..12`, `320.6s` of decoded audio per pass):
+Measured on a single pinned core (`taskset -c 2`, Intel Xeon E5-2650 v2, Rust 1.100, 2026-11-15), each figure the median of 21 full-corpus passes per configuration across `testvector01..12` (`320.6s` of decoded audio per pass); `symphonia-opus` figures are the median of three such runs, and `libopus` was measured in the same session:
 
 - **Portable Scalar Build**: `rustc -C opt-level=3` vs `libopus 1.6.1` built with `-O3 --disable-intrinsics --disable-rtcd`.
 - **Native SIMD Build**: `rustc -C opt-level=3 -C target-cpu=native` (100% safe auto-vectorized Rust) vs `libopus 1.6.1` built with `-O3 -march=native` (hand-written SSE4.1/AVX intrinsics and runtime CPU dispatch).
 
 | Build & Output Config | `symphonia-opus` Planar | `symphonia-opus` Interleaved | `libopus 1.6.1` | Planar / `libopus` Speed | Real-Time Factor |
 | :--- | ---: | ---: | ---: | :---: | ---: |
-| **Portable** `48 kHz, 2 ch` | `1100.60 ms` | `1107.75 ms` | `1041.91 ms` | **`0.95x`** | `291x RT` |
-| **Portable** `48 kHz, 1 ch` | `939.36 ms` | `942.26 ms` | `869.86 ms` | **`0.93x`** | `341x RT` |
-| **Portable** `16 kHz, 1 ch` | `892.64 ms` | `896.09 ms` | `800.57 ms` | **`0.90x`** | `359x RT` |
-| **Native SIMD** `48 kHz, 2 ch` | `1088.27 ms` | `1098.64 ms` | `1006.86 ms` | **`0.93x`** | `295x RT` |
-| **Native SIMD** `48 kHz, 1 ch` | `940.62 ms` | `945.01 ms` | `848.20 ms` | **`0.90x`** | `341x RT` |
-| **Native SIMD** `16 kHz, 1 ch` | `886.58 ms` | `887.60 ms` | `775.80 ms` | **`0.88x`** | `362x RT` |
+| **Portable** `48 kHz, 2 ch` | `1103.33 ms` | `1128.20 ms` | `1022.16 ms` | **`0.93x`** | `291x RT` |
+| **Portable** `48 kHz, 1 ch` | `951.09 ms` | `958.47 ms` | `860.38 ms` | **`0.90x`** | `337x RT` |
+| **Portable** `16 kHz, 1 ch` | `892.77 ms` | `898.48 ms` | `784.20 ms` | **`0.88x`** | `359x RT` |
+| **Native SIMD** `48 kHz, 2 ch` | `1100.14 ms` | `1115.36 ms` | `1000.87 ms` | **`0.91x`** | `291x RT` |
+| **Native SIMD** `48 kHz, 1 ch` | `946.20 ms` | `955.25 ms` | `845.07 ms` | **`0.89x`** | `339x RT` |
+| **Native SIMD** `16 kHz, 1 ch` | `889.18 ms` | `892.00 ms` | `770.33 ms` | **`0.87x`** | `361x RT` |
 
 ### 9.3 Per-Mode Breakdown (`48 kHz` Stereo, Native SIMD Build)
 
-Without a single line of `unsafe` or target-specific intrinsics, `symphonia-opus` **outperforms `libopus 1.6.1` (`1.04x` to `1.17x` faster)** on every SILK-only and Hybrid test vector (`6 of 12` official IETF vectors), and reaches `0.83x` to `0.88x` of `libopus`'s hand-tuned SSE4.1/AVX assembly on pure CELT fullband music vectors:
+Without a single line of `unsafe` or target-specific intrinsics, `symphonia-opus` **outperforms `libopus 1.6.1` (`1.03x` to `1.13x` faster)** on every SILK-only and Hybrid test vector (`6 of 12` official IETF vectors), and reaches `0.81x` to `0.87x` of `libopus`'s hand-tuned SSE4.1/AVX assembly on pure CELT fullband music vectors:
 
 | Test Vector | Coding Mode & Content | `symphonia-opus` Planar | `libopus 1.6.1` (`-march=native`) | Relative Speed (`> 1.00x` = Faster than `libopus`) |
 | :--- | :--- | ---: | ---: | :---: |
-| `testvector02` | SILK Narrowband (speech, 49% stereo) | `32.04 ms` | `35.97 ms` | **`1.12x`** |
-| `testvector03` | SILK Mediumband (speech, 48% stereo) | `32.73 ms` | `36.19 ms` | **`1.11x`** |
-| `testvector04` | SILK Wideband (speech, 49% stereo) | `46.51 ms` | `52.68 ms` | **`1.13x`** |
-| `testvector05` | Hybrid Super-Wideband (SILK + CELT) | `96.87 ms` | `101.20 ms` | **`1.04x`** |
-| `testvector06` | Hybrid Fullband (SILK + CELT) | `96.03 ms` | `101.64 ms` | **`1.06x`** |
-| `testvector12` | SILK NB..WB + 19% Hybrid SWB | `35.34 ms` | `41.44 ms` | **`1.17x`** |
-| `testvector09` | CELT NB..FB (7 bandwidth switches) | `137.44 ms` | `120.28 ms` | `0.88x` |
-| `testvector10` | CELT FB + 16% Hybrid (16 mode switches) | `172.61 ms` | `152.76 ms` | `0.88x` |
-| `testvector11` | CELT Fullband stereo (high bitrate) | `112.53 ms` | `94.47 ms` | `0.84x` |
-| `testvector01` | CELT Fullband stereo | `160.53 ms` | `132.60 ms` | `0.83x` |
-| `testvector07` | CELT NB..FB (31 bandwidth switches) | `85.15 ms` | `70.42 ms` | `0.83x` |
-| `testvector08` | CELT NB..FB (29 bandwidth switches) | `80.49 ms` | `67.20 ms` | `0.83x` |
+| `testvector02` | SILK Narrowband (speech, 49% stereo) | `32.93 ms` | `36.06 ms` | **`1.10x`** |
+| `testvector03` | SILK Mediumband (speech, 48% stereo) | `33.61 ms` | `36.27 ms` | **`1.08x`** |
+| `testvector04` | SILK Wideband (speech, 49% stereo) | `47.29 ms` | `51.73 ms` | **`1.09x`** |
+| `testvector05` | Hybrid Super-Wideband (SILK + CELT) | `98.45 ms` | `102.12 ms` | **`1.04x`** |
+| `testvector06` | Hybrid Fullband (SILK + CELT) | `97.73 ms` | `100.46 ms` | **`1.03x`** |
+| `testvector12` | SILK NB..WB + 19% Hybrid SWB | `35.30 ms` | `39.89 ms` | **`1.13x`** |
+| `testvector09` | CELT NB..FB (7 bandwidth switches) | `139.80 ms` | `120.61 ms` | `0.86x` |
+| `testvector10` | CELT FB + 16% Hybrid (16 mode switches) | `172.19 ms` | `149.98 ms` | `0.87x` |
+| `testvector11` | CELT Fullband stereo (high bitrate) | `111.89 ms` | `93.54 ms` | `0.84x` |
+| `testvector01` | CELT Fullband stereo | `164.56 ms` | `133.59 ms` | `0.81x` |
+| `testvector07` | CELT NB..FB (31 bandwidth switches) | `85.25 ms` | `69.06 ms` | `0.81x` |
+| `testvector08` | CELT NB..FB (29 bandwidth switches) | `81.00 ms` | `66.83 ms` | `0.83x` |
 
 Key safe-Rust optimizations behind these results:
 - **Zero-copy planar `AudioBuffer<f32>` decoding (`decoder.rs`, `planes.rs`)**: Single-stream and bijective Vorbis multi-stream packets decode directly into Symphonia's output planes without intermediate frame buffers or redundant `memset` passes.
