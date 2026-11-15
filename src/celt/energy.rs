@@ -23,6 +23,7 @@ use crate::celt::constant::{
     BETA_COEF, BETA_INTRA, CDF_SMALL_ENERGY, E_PROB_MODEL, LOSS_SAFETY_MARGIN, LaplaceModel,
     MAX_BANDS, MAX_CHANNELS, MAX_FINE_BITS, PRED_COEF, SMALL_ENERGY_RESIDUALS,
 };
+use crate::convert::{BoundedFrom, ExactF32};
 use crate::entropy::Decoder;
 use symphonia_core::errors::Result;
 
@@ -130,7 +131,8 @@ impl BandEnergyHistory {
         lm: BlockSize,
         loss_duration: usize,
     ) {
-        let lost_frames = (loss_duration >> lm.log2()).min(MAX_EXTRAPOLATED_LOST_FRAMES) as f32;
+        let lost_frames =
+            (loss_duration >> lm.log2()).min(MAX_EXTRAPOLATED_LOST_FRAMES).exact_f32();
         let margin = LOSS_SAFETY_MARGIN[lm.log2()];
         let older = self.previous.iter().zip(&self.two_back);
         for (current, (previous, two_back)) in self.current.iter_mut().zip(older) {
@@ -183,7 +185,7 @@ impl BandEnergyHistory {
         self.advance_history(is_transient);
 
         let elapsed_units = (loss_duration + lm.blocks()).min(MAX_BACKGROUND_INCREASE_UNITS);
-        let max_increase = (elapsed_units as f32) * BACKGROUND_INCREASE_PER_UNIT;
+        let max_increase = elapsed_units.exact_f32() * BACKGROUND_INCREASE_PER_UNIT;
         let floors = self.background.as_flattened_mut().iter_mut();
         floors.zip(self.current.as_flattened()).for_each(|(floor, &now)| {
             *floor = (*floor + max_increase).min(now);
@@ -258,7 +260,7 @@ pub(crate) fn unquant_coarse_energy(
 
     for band in bands {
         for (energies, p) in band_e.iter_mut().zip(prediction.iter_mut()) {
-            let q = decode_coarse_residual(range_decoder, budget, models[band])? as f32;
+            let q = decode_coarse_residual(range_decoder, budget, models[band])?.exact_f32();
             energies[band] = alpha * energies[band].max(MIN_COARSE_PREDICTION_ENERGY) + *p + q;
             *p = *p + q - beta * q;
         }
@@ -284,7 +286,7 @@ fn decode_coarse_residual(
             Ok(SMALL_ENERGY_RESIDUALS[symbol as usize])
         }
         left if left >= ONE_BIT_MIN_BITS => {
-            Ok(-(range_decoder.decode_symbol_logp(ONE_BIT_RESIDUAL_LOGP)? as i32))
+            Ok(-i32::bounded_from(range_decoder.decode_symbol_logp(ONE_BIT_RESIDUAL_LOGP)?))
         }
         _ => Ok(EXHAUSTED_RESIDUAL),
     };
@@ -293,7 +295,7 @@ fn decode_coarse_residual(
 /// Width `2^-bits` of one quantization step refined by `bits` bits, in 6 dB units; exact in
 /// `f32` for every bit count up to [`MAX_FINE_BITS`] plus one.
 fn step_size(bits: i32) -> f32 {
-    return 1.0 / ((1_i32 << bits) as f32);
+    return 1.0 / (1_i32 << bits).exact_f32();
 }
 
 /// Adds the fine energy refinement of `bands` to every channel row of `band_e`
@@ -310,7 +312,7 @@ pub(crate) fn unquant_fine_energy(
         let fine_bits = fine_quant[band];
         let step = step_size(fine_bits);
         for energies in band_e.iter_mut() {
-            let f = range_decoder.decode_raw_bits(fine_bits as u32)? as f32;
+            let f = range_decoder.decode_raw_bits(u32::bounded_from(fine_bits))?.exact_f32();
             energies[band] += (f + 0.5) * step - 0.5;
         }
     }
@@ -331,19 +333,19 @@ pub(crate) fn unquant_energy_finalise(
     bits_left: i32,
     band_e: &mut [[f32; MAX_BANDS]],
 ) -> Result<()> {
-    let channels = band_e.len() as i32;
+    let channels = i32::bounded_from(band_e.len());
     let mut bits_left = bits_left;
     for priority in [false, true] {
-        let pass = bands.clone().filter(|&i| {
-            return fine_priority[i] == priority && fine_quant[i] < MAX_FINE_BITS;
-        });
+        let pass = bands
+            .clone()
+            .filter(|&i| fine_priority[i] == priority && fine_quant[i] < MAX_FINE_BITS);
         for band in pass {
             if bits_left < channels {
                 return Ok(());
             }
             let step = step_size(fine_quant[band] + 1);
             for energies in band_e.iter_mut() {
-                let f = range_decoder.decode_raw_bits(1)? as f32;
+                let f = range_decoder.decode_raw_bits(1)?.exact_f32();
                 energies[band] += (f - 0.5) * step;
             }
             bits_left -= channels;
@@ -406,13 +408,13 @@ mod tests {
     fn energy_mono_inter_lm3_matches_recorded_values() {
         let mut packet = [0u8; 32];
         for (i, byte) in packet.iter_mut().enumerate() {
-            *byte = ((i * 73 + 19) & 0xFF) as u8;
+            *byte = u8::bounded_from((i * 73 + 19) & 0xFF);
         }
         let mut dec = Decoder::new(&packet);
 
         let mut old_band_e = [[0.0_f32; MAX_BANDS]; MAX_CHANNELS];
         for (i, val) in old_band_e[0].iter_mut().enumerate() {
-            *val = ((i % 7) as f32) * 0.5 - 1.5;
+            *val = (i % 7).exact_f32() * 0.5 - 1.5;
         }
 
         unquant_coarse_energy(&mut dec, 0..21, false, BlockSize::new(3), &mut old_band_e[..1])
@@ -494,7 +496,7 @@ mod tests {
     fn energy_stereo_intra_tight_budget_matches_recorded_values() {
         let mut packet = [0u8; 12];
         for (i, byte) in packet.iter_mut().enumerate() {
-            *byte = ((i * 131 + 42) & 0xFF) as u8;
+            *byte = u8::bounded_from((i * 131 + 42) & 0xFF);
         }
         let mut dec = Decoder::new(&packet);
 
@@ -502,7 +504,7 @@ mod tests {
         for (c, ch_row) in old_band_e.iter_mut().enumerate() {
             for (b, slot) in ch_row.iter_mut().enumerate() {
                 let i = c * MAX_BANDS + b;
-                *slot = -12.0 + (i as f32) * 0.25;
+                *slot = -12.0 + i.exact_f32() * 0.25;
             }
         }
 
@@ -548,15 +550,15 @@ mod tests {
     fn energy_hybrid_stereo_inter_lm2_matches_recorded_values() {
         let mut packet = [0u8; 16];
         for (i, byte) in packet.iter_mut().enumerate() {
-            *byte = ((i * 59 + 201) & 0xFF) as u8;
+            *byte = u8::bounded_from((i * 59 + 201) & 0xFF);
         }
         let mut dec = Decoder::new(&packet);
 
         let mut old_band_e = [[0.0_f32; MAX_BANDS]; MAX_CHANNELS];
         for (c, ch_row) in old_band_e.iter_mut().enumerate() {
             for (b, slot) in ch_row.iter_mut().enumerate() {
-                let i = (c * MAX_BANDS + b) as isize;
-                *slot = 0.25 * ((i - 10) as f32);
+                let i = i32::bounded_from(c * MAX_BANDS + b);
+                *slot = 0.25 * (i - 10).exact_f32();
             }
         }
 

@@ -179,12 +179,13 @@ fn deemphasize(x: f32, memory: &mut f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convert::ExactF32;
 
     #[test]
     fn test_deemphasis_48khz_and_decimated_rates() {
         let mut input = [0.0f32; 48];
         for (i, slot) in input.iter_mut().enumerate() {
-            *slot = ((i as f32) * 0.25).sin() * 16384.0;
+            *slot = (i.exact_f32() * 0.25).sin() * 16384.0;
         }
 
         // Full 48 kHz (`downsample = 1`)

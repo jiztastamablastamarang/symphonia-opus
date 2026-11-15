@@ -13,6 +13,7 @@ use crate::celt::MAX_FRAME_SIZE;
 use crate::celt::PITCH_HISTORY_LEN;
 use crate::celt::constant::OVERLAP;
 use crate::celt::mdct::tests::assert_f32_slice_close;
+use crate::convert::ExactF32;
 
 const COMB_FILTER_TRANSITION_HEAD16: [f32; 16] = [
     -2.52808472e+02,
@@ -77,7 +78,7 @@ fn comb_filter_reset_and_state_advance() {
 fn comb_filter_transition_and_steady_state_match_recorded_values() {
     let mut buf = [0.0f32; PITCH_HISTORY_LEN + 240];
     for (i, slot) in buf.iter_mut().enumerate() {
-        *slot = (i as f32 * 0.09).sin() * 200.0 + (i as f32 * 0.23).cos() * 80.0;
+        *slot = (i.exact_f32() * 0.09).sin() * 200.0 + (i.exact_f32() * 0.23).cos() * 80.0;
     }
 
     let from = PostFilterParams { period: 120, gain: 0.375, tapset: 0 };

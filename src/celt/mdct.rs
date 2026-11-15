@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use crate::celt::constant::{CELT_WINDOW, OVERLAP};
 use crate::celt::fft::{Complex32, MixedRadixPlan};
 use crate::celt::{BlockSize, MAX_FRAME_SIZE, MAX_LM, SHORT_MDCT_SIZE};
+use crate::convert::{BoundedFrom, nearest_f32};
 
 /// Maximum full-window MDCT length at 48 kHz (`2 * MAX_FRAME_SIZE = 1920` samples).
 pub(crate) const MDCT_MAX_N: usize = 2 * MAX_FRAME_SIZE;
@@ -30,8 +31,9 @@ fn mdct_tables() -> &'static MdctTables {
     static TABLES: OnceLock<MdctTables> = OnceLock::new();
     return TABLES.get_or_init(|| {
         let fft_twiddles = std::array::from_fn(|k| {
-            let phase = (-2.0 * std::f64::consts::PI * (k as f64)) / (MDCT_MAX_N4 as f64);
-            Complex32::new(phase.cos() as f32, phase.sin() as f32)
+            let phase = (-2.0 * std::f64::consts::PI * f64::from(u32::bounded_from(k)))
+                / f64::from(u32::bounded_from(MDCT_MAX_N4));
+            Complex32::new(nearest_f32(phase.cos()), nearest_f32(phase.sin()))
         });
 
         let mut bitrev = [[0u16; MDCT_MAX_N4]; 4];
@@ -43,12 +45,14 @@ fn mdct_tables() -> &'static MdctTables {
             MixedRadixPlan::for_shift(shift).digit_reversal(&mut bitrev[shift][..n4]);
 
             for (i, slot) in trig[shift][..n4].iter_mut().enumerate() {
-                let angle = (2.0 * std::f64::consts::PI * ((i as f64) + 0.125)) / (n as f64);
-                *slot = Complex32::new(angle.cos() as f32, (-angle.sin()) as f32);
+                let angle =
+                    (2.0 * std::f64::consts::PI * (f64::from(u32::bounded_from(i)) + 0.125))
+                        / f64::from(u32::bounded_from(n));
+                *slot = Complex32::new(nearest_f32(angle.cos()), nearest_f32(-angle.sin()));
             }
         }
 
-        return MdctTables { fft_twiddles, bitrev, trig };
+        MdctTables { fft_twiddles, bitrev, trig }
     });
 }
 
@@ -230,6 +234,8 @@ pub(crate) fn mdct_backward_frame(
     let half_overlap = OVERLAP >> 1;
     let tables = mdct_tables();
 
+    // Indexing (A): short block `i` reads every `count`-th coefficient from `freq[i]` and its
+    // windowed output overlaps the next block's, so each block addresses its own offset.
     for i in 0..count {
         let out = &mut out_syn[(i * SHORT_MDCT_SIZE)..];
         imdct_unwindowed(
@@ -265,6 +271,8 @@ pub(crate) fn mdct_backward_frame_dual(
     let half_overlap = OVERLAP >> 1;
     let tables = mdct_tables();
 
+    // Indexing (A): as in `mdct_backward_frame`, blocks interleave their coefficients and
+    // overlap their outputs.
     for i in 0..count {
         let offset = i * SHORT_MDCT_SIZE;
         let left = &mut left_syn[offset..];

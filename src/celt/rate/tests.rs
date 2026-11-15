@@ -4,6 +4,7 @@
 // normative (RFC 6716 Section 4.3.3) and is verified against the RFC 8251 test vectors by
 // `tests/rfc6716_conformance.rs`.
 use super::*;
+use crate::convert::BoundedFrom;
 
 /// Verifies `get_pulses`, `bits2pulses`, and `pulses2bits` against the recorded values.
 #[test]
@@ -67,7 +68,7 @@ fn pulse_cache_conversions_match_recorded_values() {
 fn tf_decode_matches_recorded_values() {
     let mut packet = [0u8; 16];
     for (i, byte) in packet.iter_mut().enumerate() {
-        *byte = ((i * 97 + 11) & 0xFF) as u8;
+        *byte = u8::bounded_from((i * 97 + 11) & 0xFF);
     }
 
     // Case 1: transient = false, lm = 3, start = 0, end = 21
@@ -103,7 +104,7 @@ fn tf_decode_matches_recorded_values() {
 fn band_allocation_mono_lm3_matches_recorded_values() {
     let mut packet = [0u8; 40];
     for (i, byte) in packet.iter_mut().enumerate() {
-        *byte = ((i * 41 + 7) & 0xFF) as u8;
+        *byte = u8::bounded_from((i * 41 + 7) & 0xFF);
     }
     let mut dec = Decoder::new(&packet);
 
@@ -157,7 +158,7 @@ fn band_allocation_mono_lm3_matches_recorded_values() {
 fn band_allocation_stereo_lm2_matches_recorded_values() {
     let mut packet = [0u8; 60];
     for (i, byte) in packet.iter_mut().enumerate() {
-        *byte = ((i * 83 + 150) & 0xFF) as u8;
+        *byte = u8::bounded_from((i * 83 + 150) & 0xFF);
     }
     let mut dec = Decoder::new(&packet);
 
@@ -207,7 +208,7 @@ fn band_allocation_stereo_lm2_matches_recorded_values() {
 fn band_allocation_hybrid_stereo_lm3_matches_recorded_values() {
     let mut packet = [0u8; 32];
     for (i, byte) in packet.iter_mut().enumerate() {
-        *byte = ((i * 29 + 99) & 0xFF) as u8;
+        *byte = u8::bounded_from((i * 29 + 99) & 0xFF);
     }
     let mut dec = Decoder::new(&packet);
     for _ in 0..15 {
@@ -250,7 +251,7 @@ fn band_allocation_hybrid_stereo_lm3_matches_recorded_values() {
 fn band_allocation_high_bitrate_matches_recorded_values() {
     let mut packet = [0u8; 160];
     for (i, byte) in packet.iter_mut().enumerate() {
-        *byte = ((i * 67 + 13) & 0xFF) as u8;
+        *byte = u8::bounded_from((i * 67 + 13) & 0xFF);
     }
     let mut dec = Decoder::new(&packet);
 

@@ -8,6 +8,7 @@ use crate::celt::vq::{
     BandDecoderCtx, Half, Lowband, Partition, STEREO_MERGE_MIN_ENERGY, SplitAngle, SplitKind,
     THETA_HALF_Q14, THETA_MAX_Q14,
 };
+use crate::convert::ExactF32;
 use crate::planes::Planes;
 use symphonia_core::errors::Result;
 
@@ -57,7 +58,7 @@ impl BandDecoderCtx<'_, '_> {
         self.remaining_bits -= split.qalloc + sbits;
 
         let sign_bit = if sbits != 0 { self.dec.decode_raw_bits(1)? } else { 0 };
-        let sign = 1.0_f32 - 2.0_f32 * (sign_bit as f32);
+        let sign = 1.0_f32 - 2.0_f32 * sign_bit.exact_f32();
         let primary = Partition { bits: mbits, gain: 1.0_f32, ..part };
 
         let (primary_band, secondary_band) =

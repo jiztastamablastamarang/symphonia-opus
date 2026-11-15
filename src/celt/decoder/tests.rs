@@ -10,6 +10,7 @@
 // vectors by `tests/rfc6716_conformance.rs`; the concealment steps are regression pins for
 // behaviour that RFC 6716 Section 4.4 leaves to the implementation.
 use super::*;
+use crate::convert::ExactF32;
 
 /// Frame layout for a test decode: `frame_size_48k` samples at 48 kHz, `start_band`,
 /// `bandwidth` and `stream_channels` as the TOC would give them.
@@ -536,7 +537,7 @@ fn celt_hybrid_highband_on_a_shared_range_decoder_matches_recorded_values() {
 
     let mut out_pcm = [0.0_f32; 480];
     for (i, sample) in out_pcm.iter_mut().enumerate() {
-        *sample = 0.125_f32 * (((i % 17) as i32 - 8) as f32);
+        *sample = 0.125_f32 * (i32::bounded_from(i % 17) - 8).exact_f32();
     }
 
     let written = dec

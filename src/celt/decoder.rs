@@ -47,6 +47,7 @@ use crate::celt::{
     BITRES, BlockSize, DECODE_BUFFER_SIZE, MAX_BANDS, MAX_CHANNELS, MAX_FRAME_SIZE, OVERLAP,
     SILENCE_FRAME, Spread, end_band_for,
 };
+use crate::convert::BoundedFrom;
 use crate::entropy;
 use crate::planes::Planes;
 use crate::sample_rate::SampleRate;
@@ -225,7 +226,7 @@ fn decode_budgeted_flag(
     logp: u32,
     total_bits: i32,
 ) -> Result<bool> {
-    if dec.tell() + logp as i32 > total_bits {
+    if dec.tell() + i32::bounded_from(logp) > total_bits {
         return Ok(false);
     }
     return Ok(dec.decode_symbol_logp(logp)? != 0);

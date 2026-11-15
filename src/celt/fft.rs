@@ -7,6 +7,7 @@
 //! which [`MixedRadixPlan`] evaluates in place on a digit-reversed input buffer.
 
 use crate::celt::mdct::MDCT_MAX_N4;
+use crate::convert::BoundedFrom;
 
 /// Single-precision complex number used in the mixed-radix quarter-length FFT.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -157,8 +158,9 @@ fn digit_reversal_recursive(
     let (radix, span) = stages[0];
     let rest = &stages[1..];
     if span == 1 {
-        for j in 0..radix {
-            out[in_offset + j * fstride * in_stride] = (fout + j) as u16;
+        let slots = out[in_offset..].iter_mut().step_by(fstride * in_stride);
+        for (slot, index) in slots.zip(fout..fout + radix) {
+            *slot = u16::bounded_from(index);
         }
         return;
     }

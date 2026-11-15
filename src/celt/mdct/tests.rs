@@ -9,6 +9,7 @@
 // normative (RFC 6716 Section 4.3.7) and is verified against the RFC 8251 test vectors by
 // `tests/rfc6716_conformance.rs`.
 use super::*;
+use crate::convert::ExactF32;
 
 const MDCT_LM0_HEAD16: [f32; 16] = [
     -1.50047092e+01,
@@ -238,10 +239,10 @@ fn imdct_overlap_add_all_block_sizes_match_recorded_values() {
         let mut out_buf = [0.0f32; 960 + 120];
 
         for (i, slot) in in_freq[..n_bins].iter_mut().enumerate() {
-            *slot = ((i + 1) as f32 * 0.17).sin() * ((i as f32) * 0.03).cos() * 100.0;
+            *slot = ((i + 1).exact_f32() * 0.17).sin() * (i.exact_f32() * 0.03).cos() * 100.0;
         }
         for (i, slot) in out_buf[..60].iter_mut().enumerate() {
-            *slot = ((i as isize - 30) as f32) * 0.5;
+            *slot = (i32::bounded_from(i) - 30).exact_f32() * 0.5;
         }
 
         mdct_backward_frame(&in_freq[..n_bins], &mut out_buf, BlockSize::new(lm), false);
@@ -260,10 +261,10 @@ fn imdct_overlap_add_transient_short_blocks_match_recorded_values() {
     let mut out_buf = [0.0f32; 480 + 120];
 
     for (i, slot) in in_freq.iter_mut().enumerate() {
-        *slot = ((i + 3) as f32 * 0.11).cos() * 50.0;
+        *slot = ((i + 3).exact_f32() * 0.11).cos() * 50.0;
     }
     for (i, slot) in out_buf[..60].iter_mut().enumerate() {
-        *slot = (i as f32) * 0.25 - 5.0;
+        *slot = i.exact_f32() * 0.25 - 5.0;
     }
 
     mdct_backward_frame(&in_freq, &mut out_buf, BlockSize::new(lm), true);
@@ -309,18 +310,18 @@ fn mdct_backward_frame_dual_is_bit_identical_for_all_block_sizes_and_transients(
         for is_transient in [false, true] {
             let mut in_freq = [0.0f32; MAX_FRAME_SIZE];
             for (i, slot) in in_freq[..n_bins].iter_mut().enumerate() {
-                let phase_a = ((i + 1) as f32) * 0.13 + (lm as f32) * 0.7;
-                let phase_b = (i as f32) * 0.041;
+                let phase_a = (i + 1).exact_f32() * 0.13 + lm.exact_f32() * 0.7;
+                let phase_b = i.exact_f32() * 0.041;
                 *slot = phase_a.sin() * phase_b.cos() * 75.0;
             }
 
             let mut left_expected = [0.0f32; MAX_FRAME_SIZE + OVERLAP];
             let mut right_expected = [0.0f32; MAX_FRAME_SIZE + OVERLAP];
             for (i, slot) in left_expected[..total_len].iter_mut().enumerate() {
-                *slot = ((i as f32) * 0.29 + 0.4).sin() * 23.5 - 4.25;
+                *slot = (i.exact_f32() * 0.29 + 0.4).sin() * 23.5 - 4.25;
             }
             for (i, slot) in right_expected[..total_len].iter_mut().enumerate() {
-                *slot = ((i as f32) * 0.19 + 1.1).cos() * 31.0 + 9.75;
+                *slot = (i.exact_f32() * 0.19 + 1.1).cos() * 31.0 + 9.75;
             }
 
             let mut left_actual = left_expected;

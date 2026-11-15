@@ -66,6 +66,14 @@
 //!   orchestration ([RFC 6716 Section 4.3](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.3>),
 //!   [Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 pub(crate) mod bands;
 pub(crate) mod constant;
 pub(crate) mod cwrs;
@@ -114,7 +122,7 @@ pub(crate) const MAX_FRAME_SIZE: usize = SHORT_MDCT_SIZE << MAX_LM;
 ///   3    20 ms     8              960
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct BlockSize(u8);
+pub(crate) struct BlockSize(usize);
 
 impl BlockSize {
     /// The 2.5 ms frame (`LM = 0`), the unit every band width is defined in.
@@ -125,7 +133,7 @@ impl BlockSize {
     /// [`BlockSize::from_frame_size_48k`].
     pub(crate) const fn new(log2: usize) -> Self {
         assert!(log2 <= MAX_LM, "CELT block-size exponent out of range");
-        return Self(log2 as u8);
+        return Self(log2);
     }
 
     /// Derives the block size from a 48 kHz frame length (`120`, `240`, `480` or `960` samples).
@@ -142,7 +150,7 @@ impl BlockSize {
     /// The exponent `LM`, used to index per-frame-size tables.
     #[inline]
     pub(crate) const fn log2(self) -> usize {
-        return self.0 as usize;
+        return self.0;
     }
 
     /// Number of 2.5 ms short blocks in the frame (`2^LM`).

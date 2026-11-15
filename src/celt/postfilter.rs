@@ -104,11 +104,7 @@ impl CombFilter {
                 inverted(self.current),
             );
 
-            let half_overlap = OVERLAP / 2;
-            for i in 0..half_overlap {
-                channel[history_offset + i] =
-                    CELT_WINDOW[i] * etmp[OVERLAP - 1 - i] + CELT_WINDOW[OVERLAP - 1 - i] * etmp[i];
-            }
+            fold_overlap(&mut channel[history_offset..history_offset + OVERLAP / 2], &etmp);
         }
         return;
     }
@@ -176,15 +172,6 @@ impl CombFilterTaps {
             + self.second * (x[p + 2] + x[p - 2]);
     }
 
-    /// Adds the comb term centred on `x[p]` onto `acc` in left-to-right tap order.
-    #[inline]
-    fn accumulate(&self, acc: f32, x: &[f32], p: usize) -> f32 {
-        return acc
-            + self.center * x[p]
-            + self.first * (x[p + 1] + x[p - 1])
-            + self.second * (x[p + 2] + x[p - 2]);
-    }
-
     /// Comb term of `lane` within a `TAP_WINDOW` slice starting at `pos - period - 2`.
     #[inline(always)]
     fn comb_lane(&self, taps: &[f32; TAP_WINDOW], lane: usize) -> f32 {
@@ -246,8 +233,12 @@ fn filter_in_place(
     let same_filter = g0 == g1 && period0 == period1 && from.tapset == to.tapset;
     let xfade_len = if same_filter { 0 } else { OVERLAP.min(n) };
 
-    let (xfade_windows, xfade_rem) = CELT_WINDOW[..xfade_len].as_chunks::<LANES>();
-    let xfade_vec_len = xfade_len - xfade_rem.len();
+    // Indexing (P): both loops filter 8 samples at a time and split the buffer at each block's
+    // position so the lagged taps can be read while the block is written; this form compiles to
+    // 8-lane SIMD (commit `759a5c3`). Callers pass `n` of 120 or `n - 120` and a cross-fade of 0
+    // or 120 samples, all multiples of the 8 lanes, so no scalar tail is needed.
+    debug_assert!(xfade_len.is_multiple_of(LANES) && n.is_multiple_of(LANES));
+    let xfade_windows = CELT_WINDOW[..xfade_len].as_chunks::<LANES>().0;
     for (chunk_step, win) in xfade_windows.iter().enumerate() {
         let pos = history_offset + chunk_step * LANES;
         let (past, rest) = signal_buf.split_at_mut(pos);
@@ -264,22 +255,11 @@ fn filter_in_place(
             *sample = fading_in.accumulate_lane(*sample + out_comb, taps1, lane);
         }
     }
-    for (offset, &w) in xfade_rem.iter().enumerate() {
-        let pos = history_offset + xfade_vec_len + offset;
-        let f = w * w;
-        let fading_out = old_unit.scaled((1.0_f32 - f) * g0);
-        let fading_in = new_unit.scaled(f * g1);
-        let out_comb = fading_out.comb(signal_buf, pos - period0);
-        signal_buf[pos] =
-            fading_in.accumulate(signal_buf[pos] + out_comb, signal_buf, pos - period1);
-    }
-
     if g1 == 0.0 {
         return;
     }
 
-    let steady_vec_end = xfade_len + ((n - xfade_len) & !(LANES - 1));
-    for base in (xfade_len..steady_vec_end).step_by(LANES) {
+    for base in (xfade_len..n).step_by(LANES) {
         let pos = history_offset + base;
         let (past, rest) = signal_buf.split_at_mut(pos);
         let (Some(current), Some(taps1)) =
@@ -291,9 +271,18 @@ fn filter_in_place(
             *sample = new.accumulate_lane(*sample, taps1, lane);
         }
     }
-    for i in steady_vec_end..n {
-        let pos = history_offset + i;
-        signal_buf[pos] = new.accumulate(signal_buf[pos], signal_buf, pos - period1);
+    return;
+}
+
+/// Folds the post-filtered overlap `etmp` back over its first half with the window's time-domain
+/// aliasing cancellation: `out[i] = w[i] * etmp[O - 1 - i] + w[O - 1 - i] * etmp[i]`
+/// ([RFC 6716 Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
+fn fold_overlap(out: &mut [f32], etmp: &[f32; OVERLAP]) {
+    let (window_rising, window_falling) = CELT_WINDOW.split_at(OVERLAP / 2);
+    let windows = window_rising.iter().zip(window_falling.iter().rev());
+    let samples = etmp.iter().zip(etmp.iter().rev());
+    for (slot, ((&w_low, &w_high), (&e_low, &e_high))) in out.iter_mut().zip(windows.zip(samples)) {
+        *slot = w_low * e_high + w_high * e_low;
     }
     return;
 }
