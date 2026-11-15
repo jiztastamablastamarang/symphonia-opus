@@ -88,15 +88,19 @@ pub(crate) fn lpc_predict_q10(history_q14: &[i32], a_q12: &[i16]) -> i32 {
 /// <https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9.1>
 #[inline]
 pub(crate) fn ltp_predict_q13(history_q15: &[i32], b_q14: &[i16; LTP_ORDER]) -> i32 {
-    debug_assert!(history_q15.len() >= LTP_ORDER, "{} LTP history samples", history_q15.len());
-    // Spelled out per tap: this runs for every voiced sample.
-    let [h0, h1, h2, h3, h4] = *history_q15.last_chunk::<LTP_ORDER>().unwrap_or(&[0; LTP_ORDER]);
-    let [b0, b1, b2, b3, b4] = *b_q14;
-    let acc = mul_add_q16_i16(LTP_PRED_ROUNDING_BIAS_Q13, h4, b0);
-    let acc = mul_add_q16_i16(acc, h3, b1);
-    let acc = mul_add_q16_i16(acc, h2, b2);
-    let acc = mul_add_q16_i16(acc, h1, b3);
-    return mul_add_q16_i16(acc, h0, b4);
+    // Spelled out per tap: this runs for every voiced sample, with the hot path inside `if let`
+    // (other shapes measured up to 6% slower on native builds, `silk_wb_mono_20ms`).
+    if let Some(&[h0, h1, h2, h3, h4]) = history_q15.last_chunk::<LTP_ORDER>() {
+        let [b0, b1, b2, b3, b4] = *b_q14;
+        let acc = mul_add_q16_i16(LTP_PRED_ROUNDING_BIAS_Q13, h4, b0);
+        let acc = mul_add_q16_i16(acc, h3, b1);
+        let acc = mul_add_q16_i16(acc, h2, b2);
+        let acc = mul_add_q16_i16(acc, h1, b3);
+        return mul_add_q16_i16(acc, h0, b4);
+    }
+    // A history shorter than five samples cannot occur.
+    debug_assert!(false, "{} LTP history samples", history_q15.len());
+    return LTP_PRED_ROUNDING_BIAS_Q13;
 }
 
 /// Synthesizes sample `i` of the all-pole LPC filter in place (RFC 6716 Section 4.2.7.9.2).
