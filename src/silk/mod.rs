@@ -73,6 +73,14 @@
 //!   [Section 4.2.6](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.6>)).
 //! - [`error`]: Errors of the SILK layer.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 pub(crate) mod cng;
 pub(crate) mod constant;
 pub(crate) mod decoder;

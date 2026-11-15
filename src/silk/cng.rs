@@ -3,6 +3,15 @@
 //! ([RFC 6716 Section 4.2.7.9](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.9>),
 //! [Section 4.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.4>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use crate::convert::{BoundedFrom, wrap_i16};
 use crate::fixed::{mul_q16, mul_q16_i16, sqrt_approx};
 use crate::silk::excitation::advance_lcg_seed;
 use crate::silk::lpc::{lpc_synthesize_sample_q14, nlsf_to_lpc_q12};
@@ -67,11 +76,22 @@ impl Default for CngState {
     }
 }
 
+/// Spaces `nlsf_q15` uniformly over the Q15 range: entry `k` is `(k + 1) * 32767 / (n + 1)`
+/// (RFC 6716 Section 4.4).
+fn space_nlsf_uniformly(nlsf_q15: &mut [i16]) {
+    // At most 16 coefficients, so every product stays below `i16::MAX`.
+    let step_q15 = i32::from(i16::MAX) / (i32::bounded_from(nlsf_q15.len()) + 1);
+    for (nlsf, k) in nlsf_q15.iter_mut().zip(1..) {
+        *nlsf = i16::bounded_from(k * step_q15);
+    }
+    return;
+}
+
 impl CngState {
     /// Creates a new `CngState` with uniformly spaced initial NLSFs and the RFC 6716 LCG seed.
     pub(crate) fn new() -> Self {
-        let step_q15 = (i16::MAX as i32) / ((MAX_LPC_ORDER as i32) + 1);
-        let smth_nlsf_q15 = std::array::from_fn(|i| (((i as i32) + 1) * step_q15) as i16);
+        let mut smth_nlsf_q15 = [0; MAX_LPC_ORDER];
+        space_nlsf_uniformly(&mut smth_nlsf_q15);
 
         return Self {
             cng_exc_buf_q14: [0; MAX_FRAME_SAMPLES],
@@ -98,11 +118,7 @@ impl CngState {
     /// (RFC 6716 Section 4.4).
     pub(crate) fn reset_for_lpc_order(&mut self, lpc_order: usize) {
         let order = lpc_order.clamp(1, MAX_LPC_ORDER);
-        let step_q15 = (i16::MAX as i32) / ((order as i32) + 1);
-        self.cng_smth_nlsf_q15[..order]
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, nlsf)| *nlsf = (((i as i32) + 1) * step_q15) as i16);
+        space_nlsf_uniformly(&mut self.cng_smth_nlsf_q15[..order]);
         self.cng_smth_gain_q16 = 0;
         self.rand_seed = CNG_INITIAL_RAND_SEED;
         return;
@@ -133,9 +149,10 @@ impl CngState {
         let order = lpc_order.min(MAX_LPC_ORDER).min(prev_nlsf_q15.len());
         self.cng_smth_nlsf_q15[..order].iter_mut().zip(prev_nlsf_q15[..order].iter()).for_each(
             |(smth_nlsf, &target_nlsf)| {
-                let delta = (target_nlsf as i32) - (*smth_nlsf as i32);
+                let delta = i32::from(target_nlsf) - i32::from(*smth_nlsf);
+                // The reference decoder adds in 32 bits and stores with a 16-bit cast.
                 *smth_nlsf =
-                    (*smth_nlsf).wrapping_add(mul_q16_i16(delta, CNG_NLSF_SMOOTH_Q16) as i16);
+                    (*smth_nlsf).wrapping_add(wrap_i16(mul_q16_i16(delta, CNG_NLSF_SMOOTH_Q16)));
             },
         );
 
@@ -159,7 +176,7 @@ impl CngState {
             }
         }
 
-        for &subfr_gain_q16 in subframe_gains_q16[..active_subfr].iter() {
+        for &subfr_gain_q16 in &subframe_gains_q16[..active_subfr] {
             let gain_diff = subfr_gain_q16.wrapping_sub(self.cng_smth_gain_q16);
             self.cng_smth_gain_q16 =
                 self.cng_smth_gain_q16.wrapping_add(mul_q16_i16(gain_diff, CNG_GAIN_SMOOTH_Q16));
@@ -179,10 +196,12 @@ impl CngState {
             exc_mask >>= 1;
         }
 
+        // The mask selects at most 256 entries.
+        let exc_mask = i32::bounded_from(exc_mask);
         let mut seed = self.rand_seed;
         out_exc_q14.iter_mut().for_each(|dst| {
             seed = advance_lcg_seed(seed);
-            let i = ((seed >> 24) as usize) & exc_mask;
+            let i = usize::bounded_from((seed >> 24) & exc_mask);
             *dst = self.cng_exc_buf_q14[i];
         });
         self.rand_seed = seed;
@@ -192,7 +211,7 @@ impl CngState {
     /// Computes the Q10 comfort noise synthesis gain from the smoothed CNG gain and
     /// the current PLC random noise gain (RFC 6716 Section 4.4).
     fn compute_comfort_noise_gain_q10(&self, plc_state: &PlcState) -> i32 {
-        let plc_gain_q16 = mul_q16(plc_state.rand_scale_q14 as i32, plc_state.prev_gain_q16[1]);
+        let plc_gain_q16 = mul_q16(i32::from(plc_state.rand_scale_q14), plc_state.prev_gain_q16[1]);
         let use_unscaled_int_sq = plc_gain_q16 >= CNG_HIGH_PLC_GAIN_THRES_Q16
             || self.cng_smth_gain_q16 > CNG_HIGH_SMTH_GAIN_THRES_Q16;
 

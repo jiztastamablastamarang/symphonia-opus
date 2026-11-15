@@ -156,6 +156,14 @@ pub(crate) const fn nearest_f32(x: f64) -> f32 {
     return x as f32;
 }
 
+/// Rounds `x` toward zero to an `i16`, saturating at the bounds: Rust's float-to-integer
+/// conversion, for test signals built from `f64` formulas.
+#[cfg(test)]
+#[expect(clippy::cast_possible_truncation, reason = "truncation toward zero is the intent")]
+pub(crate) fn trunc_saturating_i16(x: f64) -> i16 {
+    return x as i16;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

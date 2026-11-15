@@ -6,6 +6,14 @@
 //! pulse locations of the recursive shell partitions, the LSBs and the signs, and reconstructs
 //! the Q14 excitation with the frame-continuous pseudorandom sign and the quantization offset.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
 use crate::entropy::{self, Cdf};
@@ -203,7 +211,7 @@ fn decode_shell_partition(
 
     let len = partition.len();
     if len == 1 {
-        partition[0] = total_pulses as i16;
+        partition[0] = i16::from(total_pulses);
         return Ok(());
     }
 
@@ -234,7 +242,7 @@ fn decode_block_lsbs(
 ) -> Result<()> {
     for pulse in block_pulses.iter_mut() {
         for _ in 0..lsb_count {
-            let bit = decoder.decode_symbol(constant::CDF_EXCITATION_LSB)? as i16;
+            let bit = i16::from(decoder.decode_symbol(constant::CDF_EXCITATION_LSB)?);
             *pulse = (*pulse << 1) | bit;
         }
     }
@@ -268,7 +276,7 @@ fn construct_excitation_q14(frame: &mut Frame) {
     let offset_q14 = quantization_offset_q8(frame.frame_type) << OFFSET_Q8_TO_Q14_SHIFT;
     let neg_offset_q14 = -offset_q14;
     let sample_count = frame.sample_count;
-    let mut seed = frame.lcg_seed as i32;
+    let mut seed = i32::from(frame.lcg_seed);
 
     let Frame { pulses, exc_q14, .. } = frame;
     for (&pulse, exc) in pulses[..sample_count].iter().zip(exc_q14[..sample_count].iter_mut()) {
@@ -278,7 +286,7 @@ fn construct_excitation_q14(frame: &mut Frame) {
             continue;
         }
 
-        let pulse = pulse as i32;
+        let pulse = i32::from(pulse);
         let adjust_q14 = if pulse > 0 { -QUANT_LEVEL_ADJUST_Q14 } else { QUANT_LEVEL_ADJUST_Q14 };
         let magnitude_q14 = (pulse << PULSE_TO_Q14_SHIFT) + adjust_q14 + offset_q14;
 

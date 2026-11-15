@@ -4,6 +4,15 @@
 //! [Section 4.2.8](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.8>),
 //! [Section 4.5.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.5.2>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use crate::convert::BoundedFrom;
 use crate::silk::ResamplerState;
 use crate::silk::cng;
 use crate::silk::plc;
@@ -204,7 +213,8 @@ impl ChannelState {
     ) -> Result<bool> {
         if self.sample_rate_khz != sample_rate_khz || self.output_sample_rate != output_sample_rate
         {
-            self.resampler.init((sample_rate_khz as u32) * 1000, output_sample_rate)?;
+            // 8, 12 or 16 kHz.
+            self.resampler.init(u32::bounded_from(sample_rate_khz) * 1000, output_sample_rate)?;
             self.output_sample_rate = output_sample_rate;
         }
 

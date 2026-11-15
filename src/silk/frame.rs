@@ -4,6 +4,14 @@
 //! ([RFC 6716 Section 4.2.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.2>) to
 //! [Section 4.2.7](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use crate::silk::error::Error;
 use crate::silk::{
     LTP_ORDER, MAX_FRAME_SAMPLES, MAX_LPC_ORDER, MAX_SHELL_BLOCKS, MAX_SILK_FRAMES, MAX_SUBFRAMES,
@@ -269,7 +277,7 @@ impl Frame {
         self.sample_count = sample_count;
         self.num_subframes = num_subframes;
         self.lpc_order = lpc_order;
-        for subframe in self.subframes[..num_subframes].iter_mut() {
+        for subframe in &mut self.subframes[..num_subframes] {
             *subframe = Subframe::default();
         }
         self.ltp_scale_q14 = 0;

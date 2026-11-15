@@ -1,6 +1,14 @@
 //! Errors of the SILK layer
 //! ([RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Error as SymphoniaError;
 use thiserror::Error;
 
@@ -42,7 +50,7 @@ pub(crate) enum Error {
 impl Error {
     /// The message of the error, which is also the static message of the decode error it
     /// converts into.
-    const fn message(&self) -> &'static str {
+    const fn message(self) -> &'static str {
         return match self {
             Self::InvalidLSFCoefficients => "opus silk: invalid LSF coefficients",
             Self::BufferTooSmall => "opus silk: resampler buffer too small",
@@ -67,7 +75,7 @@ impl From<Error> for SymphoniaError {
 impl Error {
     /// Whether `result` failed with this error; the decode error keeps only the message, which
     /// is unique per variant.
-    pub(crate) fn matches<T>(&self, result: &Result<T, SymphoniaError>) -> bool {
+    pub(crate) fn matches<T>(self, result: &Result<T, SymphoniaError>) -> bool {
         return matches!(result, Err(SymphoniaError::DecodeError(message)) if *message == self.message());
     }
 }

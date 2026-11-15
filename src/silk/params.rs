@@ -9,8 +9,17 @@
 //! Parameters coded relative to the previous frame of the same channel read and update
 //! [`CodingReferences`]; everything else is a pure function of the range decoder.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
+use crate::convert::BoundedFrom;
 use crate::entropy::{self, Cdf};
 use crate::silk::constant;
 use crate::silk::error::Error;
@@ -152,8 +161,8 @@ pub(crate) fn decode_silk_header(
     let num_channels = if is_stereo { 2 } else { 1 };
     let mut channels = [ChannelHeader::default(); 2];
 
-    for channel in channels[..num_channels].iter_mut() {
-        for vad_flag in channel.vad_flags[..frame_count].iter_mut() {
+    for channel in &mut channels[..num_channels] {
+        for vad_flag in &mut channel.vad_flags[..frame_count] {
             *vad_flag = decoder.decode_symbol_logp(1)? == 1;
         }
         channel.lbrr_flag = decoder.decode_symbol_logp(1)? == 1;
@@ -189,11 +198,11 @@ fn decode_per_frame_lbrr_flags(
 pub(crate) fn decode_stereo_prediction_weights(
     decoder: &mut entropy::Decoder<'_>,
 ) -> Result<StereoWeights> {
-    let n = decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_ONE)? as usize;
-    let i0 = decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_TWO)? as usize;
-    let i1 = decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_THREE)? as i32;
-    let i2 = decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_TWO)? as usize;
-    let i3 = decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_THREE)? as i32;
+    let n = usize::from(decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_ONE)?);
+    let i0 = usize::from(decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_TWO)?);
+    let i1 = i32::from(decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_THREE)?);
+    let i2 = usize::from(decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_TWO)?);
+    let i3 = i32::from(decoder.decode_symbol(constant::CDF_STEREO_PREDICTION_WEIGHT_STAGE_THREE)?);
 
     let wi0 = i0 + STEREO_WEIGHT_COARSE_STEPS * (n / STEREO_WEIGHT_STAGE_ONE_SPLIT);
     let wi1 = i2 + STEREO_WEIGHT_COARSE_STEPS * (n % STEREO_WEIGHT_STAGE_ONE_SPLIT);
@@ -209,8 +218,9 @@ pub(crate) fn decode_stereo_prediction_weights(
 fn stereo_weight_q13(boundary_index: usize, fine_index: i32) -> i32 {
     let boundaries_q13 = &constant::CODEBOOK_STEREO_QUANTIZATION_BOUNDARIES_Q13;
     let (low_q13, high_q13) = (boundaries_q13[boundary_index], boundaries_q13[boundary_index + 1]);
-    let step_q13 = (((high_q13 as i32) - (low_q13 as i32)) * STEREO_WEIGHT_STEP_Q16) >> 16;
-    return (low_q13 as i32) + step_q13 * (2 * fine_index + 1);
+    let (low_q13, high_q13) = (i32::from(low_q13), i32::from(high_q13));
+    let step_q13 = ((high_q13 - low_q13) * STEREO_WEIGHT_STEP_Q16) >> 16;
+    return low_q13 + step_q13 * (2 * fine_index + 1);
 }
 
 /// Decodes the conditional mid-only stereo flag when the side channel is inactive
@@ -303,9 +313,10 @@ impl CodingReferences {
         let contour = decode_pitch_contour(decoder, layout)?;
 
         return Ok(std::array::from_fn(|k| {
-            contour
-                .get(k)
-                .map_or(0, |&offset| (base_lag + i32::from(offset)).clamp(min_lag, max_lag) as u16)
+            contour.get(k).map_or(0, |&offset| {
+                // Every pitch lag bound is positive and at most 288.
+                u16::bounded_from((base_lag + i32::from(offset)).clamp(min_lag, max_lag))
+            })
         }));
     }
 
@@ -323,14 +334,15 @@ impl CodingReferences {
         let delta_lag_index = relative
             .then(|| decoder.decode_symbol(constant::CDF_RELATIVE_DELTA_PITCH_LAG))
             .transpose()?
-            .map_or(0, |sym| sym as i32);
+            .map_or(0, i32::from);
 
         let lag_index = match delta_lag_index {
             0 => decode_absolute_lag_index(decoder, bandwidth)?,
-            delta => (self.prev_lag_index as i32) + delta - RELATIVE_LAG_DELTA_OFFSET,
+            delta => i32::from(self.prev_lag_index) + delta - RELATIVE_LAG_DELTA_OFFSET,
         };
 
-        self.prev_lag_index = lag_index as i16;
+        // Lag indices stay below 32 * 8 + 8.
+        self.prev_lag_index = i16::bounded_from(lag_index);
         return Ok(lag_index);
     }
 }
@@ -348,8 +360,9 @@ fn decode_independent_log_gain(
         SignalType::Unvoiced => constant::CDF_INDEPENDENT_QUANTIZATION_GAIN_MSB_UNVOICED,
         SignalType::Voiced => constant::CDF_INDEPENDENT_QUANTIZATION_GAIN_MSB_VOICED,
     };
-    let gain_msb = decoder.decode_symbol(msb_cdf)? as i32;
-    let gain_lsb = decoder.decode_symbol(constant::CDF_INDEPENDENT_QUANTIZATION_GAIN_LSB)? as i32;
+    let gain_msb = i32::from(decoder.decode_symbol(msb_cdf)?);
+    let gain_lsb =
+        i32::from(decoder.decode_symbol(constant::CDF_INDEPENDENT_QUANTIZATION_GAIN_LSB)?);
     let gain_index = (gain_msb << GAIN_INDEX_LSB_BITS) + gain_lsb;
     return Ok(gain_index
         .max(prev_log_gain - INDEPENDENT_LOG_GAIN_MAX_DROP)
@@ -360,7 +373,7 @@ fn decode_independent_log_gain(
 /// `clamp(0, max(2 * delta - 16, prev_log_gain + delta - 4), 63)`
 /// ([RFC 6716 Section 4.2.7.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.4>)).
 fn decode_delta_log_gain(decoder: &mut entropy::Decoder<'_>, prev_log_gain: i32) -> Result<i32> {
-    let delta_gain = decoder.decode_symbol(constant::CDF_DELTA_QUANTIZATION_GAIN)? as i32;
+    let delta_gain = i32::from(decoder.decode_symbol(constant::CDF_DELTA_QUANTIZATION_GAIN)?);
     return Ok((2 * delta_gain - DELTA_LOG_GAIN_DOUBLE_OFFSET)
         .max(prev_log_gain + delta_gain - DELTA_LOG_GAIN_OFFSET)
         .clamp(0, LOG_GAIN_MAX));
@@ -374,7 +387,8 @@ fn decode_delta_log_gain(decoder: &mut entropy::Decoder<'_>, prev_log_gain: i32)
 /// approximation of the fractional part.
 #[inline]
 pub(crate) fn gain_q16_from_log_gain(log_gain: i32) -> i32 {
-    let in_log_q7 = (((LOG_GAIN_INV_SCALE_Q16 * (log_gain as i64)) >> 16) as i32
+    // The log gain index is at most 63, so its Q7 logarithm is far inside `i32`.
+    let in_log_q7 = (i32::bounded_from((LOG_GAIN_INV_SCALE_Q16 * i64::from(log_gain)) >> 16)
         + LOG_GAIN_OFFSET_Q7)
         .min(LOG_GAIN_MAX_Q7);
     if in_log_q7 < 0 {
@@ -387,7 +401,9 @@ pub(crate) fn gain_q16_from_log_gain(log_gain: i32) -> i32 {
     let integer_part = 1_i32 << (in_log_q7 >> LOG2_Q7_SHIFT);
     let frac_q7 = in_log_q7 & LOG2_Q7_FRAC_MASK;
     let frac_correction_q7 = frac_q7
-        + ((((frac_q7 * (LOG2_Q7_ONE - frac_q7)) as i64 * LOG2LIN_PARABOLIC_Q16) >> 16) as i32);
+        + i32::bounded_from(
+            (i64::from(frac_q7 * (LOG2_Q7_ONE - frac_q7)) * LOG2LIN_PARABOLIC_Q16) >> 16,
+        );
     let exact = in_log_q7 < LOG2LIN_EXACT_SHIFT_LIMIT_Q7;
     let (int, corr) = (integer_part, frac_correction_q7);
     let fractional_part =
@@ -400,23 +416,22 @@ pub(crate) fn gain_q16_from_log_gain(log_gain: i32) -> i32 {
 struct PitchLagSpec {
     min_lag: i32,
     max_lag: i32,
+    /// Distribution of the low part; its symbol count is the number of low parts per high part.
     low_cdf: Cdf<'static>,
-    low_part_count: i32,
 }
 
 impl PitchLagSpec {
-    const fn new(min_lag: i32, max_lag: i32, low_cdf: Cdf<'static>, low_part_count: i32) -> Self {
+    const fn new(min_lag: i32, max_lag: i32, low_cdf: Cdf<'static>) -> Self {
         assert!(min_lag > 0 && min_lag < max_lag);
-        assert!(low_part_count > 0 && low_cdf.symbols() == (low_part_count as usize));
-        return Self { min_lag, max_lag, low_cdf, low_part_count };
+        return Self { min_lag, max_lag, low_cdf };
     }
 }
 
 /// Pitch lag descriptors for narrowband (`0`), mediumband (`1`) and wideband (`2`).
 static PITCH_LAG_SPECS: [PitchLagSpec; 3] = [
-    PitchLagSpec::new(16, 144, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_NARROWBAND, 4),
-    PitchLagSpec::new(24, 216, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_MEDIUMBAND, 6),
-    PitchLagSpec::new(32, 288, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_WIDEBAND, 8),
+    PitchLagSpec::new(16, 144, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_NARROWBAND),
+    PitchLagSpec::new(24, 216, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_MEDIUMBAND),
+    PitchLagSpec::new(32, 288, constant::CDF_PRIMARY_PITCH_LAG_LOW_PART_WIDEBAND),
 ];
 
 /// Per-subframe pitch contour codebook rows for 10 ms (2 subframes) or 20 ms (4 subframes) frames.
@@ -505,10 +520,11 @@ fn decode_absolute_lag_index(
     decoder: &mut entropy::Decoder<'_>,
     bandwidth: Bandwidth,
 ) -> Result<i32> {
-    let high_part = decoder.decode_symbol(constant::CDF_PRIMARY_PITCH_LAG_HIGH_PART)? as i32;
+    let high_part = i32::from(decoder.decode_symbol(constant::CDF_PRIMARY_PITCH_LAG_HIGH_PART)?);
     let spec = &PITCH_LAG_SPECS[silk_band_slot(bandwidth)];
-    let low_part = decoder.decode_symbol(spec.low_cdf)? as i32;
-    return Ok(high_part * spec.low_part_count + low_part);
+    let low_part = i32::from(decoder.decode_symbol(spec.low_cdf)?);
+    // 4, 6 or 8 low parts.
+    return Ok(high_part * i32::bounded_from(spec.low_cdf.symbols()) + low_part);
 }
 
 /// Decodes the subframe pitch contour, the per-subframe offsets from the primary lag, from the

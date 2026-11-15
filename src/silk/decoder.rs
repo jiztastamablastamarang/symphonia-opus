@@ -5,6 +5,14 @@
 //! its regular frames, and unmixes, resamples and writes every frame pair as soon as it is
 //! decoded.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
 use crate::entropy;
@@ -96,7 +104,7 @@ impl Decoder {
         self.internal_rate_changed =
             self.channels[0].core.sample_rate_khz != layout.sample_rate_khz();
         let output_sample_rate = self.output_sample_rate;
-        for channel in self.channels.iter_mut() {
+        for channel in &mut self.channels {
             channel.set_sample_rate(layout.sample_rate_khz(), output_sample_rate)?;
         }
         self.layout = layout;
@@ -116,15 +124,20 @@ impl Decoder {
         let mut unmix_buf = [[0i16; UNMIX_BUFFER_SAMPLES]; 2];
 
         let mut total_written = 0usize;
-        self.decode_opus_frame(range_decoder, is_stereo, |decoder, kind, i, pair| {
-            if kind == FrameKind::Lbrr {
-                return Ok(());
+        self.decode_opus_frame(range_decoder, is_stereo, |decoder, kind, i, pair| match kind {
+            FrameKind::Lbrr => Ok(()),
+            FrameKind::Regular { .. } => {
+                let stereo_to_mono = stereo_to_mono && i == 0;
+                let out = out.range(total_written..);
+                total_written += decoder.output_frame_pair(
+                    pair,
+                    is_stereo,
+                    stereo_to_mono,
+                    out,
+                    &mut unmix_buf,
+                )?;
+                Ok(())
             }
-            let stereo_to_mono = stereo_to_mono && i == 0;
-            let out = out.range(total_written..);
-            total_written +=
-                decoder.output_frame_pair(pair, is_stereo, stereo_to_mono, out, &mut unmix_buf)?;
-            return Ok(());
         })?;
 
         return Ok(total_written);
@@ -281,7 +294,7 @@ impl Decoder {
         let (stereo_weights, mid_only) = (plan.is_stereo && decode_mid)
             .then(|| -> Result<_> {
                 let weights = decode_stereo_prediction_weights(range_decoder)?;
-                return Ok((weights, decode_mid_only_flag(range_decoder, plan.side_active)?));
+                Ok((weights, decode_mid_only_flag(range_decoder, plan.side_active)?))
             })
             .transpose()?
             .map_or((None, false), |(weights, mid_only)| (Some(weights), mid_only));
@@ -292,7 +305,7 @@ impl Decoder {
                 self.decode_single_silk_frame(
                     range_decoder,
                     0,
-                    &plan,
+                    plan,
                     plan.mid_coding,
                     &mut pair.mid,
                 )?;
@@ -315,7 +328,7 @@ impl Decoder {
         match decode_side {
             true => {
                 let side = pair.side.get_or_insert_with(Frame::default);
-                self.decode_single_silk_frame(range_decoder, 1, &plan, plan.side_coding, side)?;
+                self.decode_single_silk_frame(range_decoder, 1, plan, plan.side_coding, side)?;
                 side.stereo_weights = stereo_weights;
                 side.mid_only = mid_only;
             }
@@ -338,7 +351,7 @@ impl Decoder {
         &mut self,
         range_decoder: &mut entropy::Decoder<'_>,
         channel: usize,
-        plan: &FramePairPlan,
+        plan: FramePairPlan,
         coding_mode: CodingMode,
         frame: &mut Frame,
     ) -> Result<()> {
@@ -504,8 +517,8 @@ impl FramePairPlan {
             kind: FrameKind::Lbrr,
             mid_active: mid.per_frame_lbrr[i],
             side_active: side.per_frame_lbrr[i],
-            mid_coding: Self::lbrr_coding_mode(&mid.per_frame_lbrr, i),
-            side_coding: Self::lbrr_coding_mode(&side.per_frame_lbrr, i),
+            mid_coding: Self::lbrr_coding_mode(mid.per_frame_lbrr, i),
+            side_coding: Self::lbrr_coding_mode(side.per_frame_lbrr, i),
         };
     }
 
@@ -542,7 +555,7 @@ impl FramePairPlan {
 
     /// An LBRR frame is coded conditionally when the same channel carried the previous LBRR
     /// frame of the packet ([RFC 6716 Section 4.2.7.4](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.4>)).
-    fn lbrr_coding_mode(flags: &[bool; MAX_SILK_FRAMES], i: usize) -> CodingMode {
+    fn lbrr_coding_mode(flags: [bool; MAX_SILK_FRAMES], i: usize) -> CodingMode {
         if i.checked_sub(1).is_some_and(|j| flags[j]) {
             return CodingMode::Conditional;
         }
@@ -588,7 +601,7 @@ mod tests {
                     FrameKind::Lbrr => lbrr[i] = Some(pair.clone()),
                     FrameKind::Regular { .. } => regular[i] = Some(pair.clone()),
                 }
-                return Ok(());
+                Ok(())
             })
             .unwrap();
 
@@ -619,7 +632,7 @@ mod tests {
                 if kind != FrameKind::Lbrr && side.is_none() {
                     side = pair.side.clone();
                 }
-                return Ok(());
+                Ok(())
             })
             .unwrap();
         return side.unwrap();

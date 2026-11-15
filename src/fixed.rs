@@ -21,14 +21,22 @@
 //!   div_q(a, b, q)            i32, i32          (a << q) / b, about 16 significant bits
 //! ```
 
-use crate::convert::wrap_i16;
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use crate::convert::{BoundedFrom, wrap_i16, wrap_i32};
 
 /// Multiplies a 32-bit value by a 16-bit value and drops 16 fractional bits: `(a * b) >> 16`.
 /// One of the bit-exact SILK fixed-point primitives of
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
 pub(crate) fn mul_q16_i16(a: i32, b: i16) -> i32 {
-    return (((a as i64) * (b as i64)) >> 16) as i32;
+    return wrap_i32((i64::from(a) * i64::from(b)) >> 16);
 }
 
 /// Adds the `Q16` product of a 32-bit and a 16-bit value to `acc` with wrapping arithmetic:
@@ -45,7 +53,7 @@ pub(crate) fn mul_add_q16_i16(acc: i32, a: i32, b: i16) -> i32 {
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
 pub(crate) fn mul_q16(a: i32, b: i32) -> i32 {
-    return (((a as i64) * (b as i64)) >> 16) as i32;
+    return wrap_i32((i64::from(a) * i64::from(b)) >> 16);
 }
 
 /// Adds the `Q16` product of two 32-bit values to `acc` with wrapping arithmetic:
@@ -70,7 +78,7 @@ pub(crate) fn mul_low_i16(a: i32, b: i32) -> i32 {
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
 pub(crate) fn mul_high_i32(a: i32, b: i32) -> i32 {
-    return (((a as i64) * (b as i64)) >> 32) as i32;
+    return wrap_i32((i64::from(a) * i64::from(b)) >> 32);
 }
 
 /// Arithmetic right shift by `shift >= 1` bits with round-to-nearest (ties away from zero for
@@ -101,13 +109,11 @@ pub(crate) fn round_shift_i64(a: i64, shift: u32) -> i64 {
 /// [RFC 6716 Section 4.2](<https://datatracker.ietf.org/doc/html/rfc6716#section-4.2>).
 #[inline(always)]
 pub(crate) fn saturate_i16(a: i32) -> i16 {
-    if a > i16::MAX as i32 {
-        return i16::MAX;
-    }
-    if a < i16::MIN as i32 {
-        return i16::MIN;
-    }
-    return a as i16;
+    return match i16::try_from(a) {
+        Ok(narrowed) => narrowed,
+        Err(_) if a < 0 => i16::MIN,
+        Err(_) => i16::MAX,
+    };
 }
 
 /// Left shift that saturates instead of overflowing; a shift of 31 or more maps every non-zero
@@ -125,14 +131,12 @@ pub(crate) fn shl_saturating(a: i32, shift: u32) -> i32 {
         }
         return 0;
     }
-    let shifted = (a as i64) << shift;
-    if shifted > i32::MAX as i64 {
-        return i32::MAX;
-    }
-    if shifted < i32::MIN as i64 {
-        return i32::MIN;
-    }
-    return shifted as i32;
+    let shifted = i64::from(a) << shift;
+    return match i32::try_from(shifted) {
+        Ok(narrowed) => narrowed,
+        Err(_) if shifted < 0 => i32::MIN,
+        Err(_) => i32::MAX,
+    };
 }
 
 /// Compile-time constant left shift (`SHIFT < 31`) that saturates at the 32-bit signed bounds
@@ -163,23 +167,32 @@ pub(crate) fn reciprocal_q(b: i32, q_res: i32) -> i32 {
         return 0;
     }
 
-    let b_headroom = (b.unsigned_abs().leading_zeros() as i32) - 1;
-    let b_normalized = b.wrapping_shl(b_headroom as u32);
-    let denominator = (b_normalized >> 16) as i16 as i32;
+    let b_headroom = headroom(b);
+    let b_normalized = b.wrapping_shl(b_headroom.cast_unsigned());
+    // The top 16 bits of an `i32` always fit in an `i16`.
+    let denominator = b_normalized >> 16;
     if denominator == 0 {
         return 0;
     }
 
     let b_inverse = (i32::MAX >> 2) / denominator;
     let mut result = b_inverse.wrapping_shl(16);
-    let error_q32 = ((1i32 << 29) - mul_q16_i16(b_normalized, b_inverse as i16)).wrapping_shl(3);
+    let error_q32 = ((1i32 << 29) - mul_q16_i16(b_normalized, wrap_i16(b_inverse))).wrapping_shl(3);
     result = mul_add_q16(result, error_q32, b_inverse);
 
     let left_shift = 61 - b_headroom - q_res;
     if left_shift <= 0 {
-        return shl_saturating(result, (-left_shift) as u32);
+        return shl_saturating(result, left_shift.unsigned_abs());
     }
-    return result.checked_shr(left_shift as u32).unwrap_or(0);
+    return result.checked_shr(left_shift.unsigned_abs()).unwrap_or(0);
+}
+
+/// Redundant sign bits of `a`: its leading zeros of the magnitude minus one (`silk_CLZ32` of
+/// `silk_abs` minus one), `-1` for `i32::MIN`.
+#[inline]
+fn headroom(a: i32) -> i32 {
+    // At most 32 leading zeros.
+    return i32::bounded_from(a.unsigned_abs().leading_zeros()) - 1;
 }
 
 /// Approximates `(a << q_res) / b` with one Newton refinement step, exactly as the normative
@@ -192,25 +205,26 @@ pub(crate) fn div_q(a: i32, b: i32, q_res: i32) -> i32 {
         return 0;
     }
 
-    let a_headroom = (a.unsigned_abs().leading_zeros() as i32) - 1;
-    let mut a_normalized = a.wrapping_shl(a_headroom as u32);
-    let b_headroom = (b.unsigned_abs().leading_zeros() as i32) - 1;
-    let b_normalized = b.wrapping_shl(b_headroom as u32);
-    let denominator = (b_normalized >> 16) as i16 as i32;
+    let a_headroom = headroom(a);
+    let mut a_normalized = a.wrapping_shl(a_headroom.cast_unsigned());
+    let b_headroom = headroom(b);
+    let b_normalized = b.wrapping_shl(b_headroom.cast_unsigned());
+    // The top 16 bits of an `i32` always fit in an `i16`.
+    let denominator = b_normalized >> 16;
     if denominator == 0 {
         return 0;
     }
 
     let b_inverse = (i32::MAX >> 2) / denominator;
-    let mut result = mul_q16_i16(a_normalized, b_inverse as i16);
+    let mut result = mul_q16_i16(a_normalized, wrap_i16(b_inverse));
     a_normalized = a_normalized.wrapping_sub(mul_high_i32(b_normalized, result).wrapping_shl(3));
-    result = mul_add_q16_i16(result, a_normalized, b_inverse as i16);
+    result = mul_add_q16_i16(result, a_normalized, wrap_i16(b_inverse));
 
     let left_shift = 29 + a_headroom - b_headroom - q_res;
     if left_shift < 0 {
-        return shl_saturating(result, (-left_shift) as u32);
+        return shl_saturating(result, left_shift.unsigned_abs());
     }
-    return result.checked_shr(left_shift as u32).unwrap_or(0);
+    return result.checked_shr(left_shift.unsigned_abs()).unwrap_or(0);
 }
 
 /// Square root base for an odd leading bit position, `32768` (`2^15`)
@@ -237,12 +251,15 @@ pub(crate) fn sqrt_approx(x: i32) -> i32 {
     if x <= 0 {
         return 0;
     }
-    let leading_zeros = (x as u32).leading_zeros() as i32;
-    let rotation = (SQRT_FRACTION_END - leading_zeros) as u32;
-    let fraction = ((x as u32).rotate_right(rotation) & SQRT_FRACTION_MASK) as i32;
+    let magnitude = x.unsigned_abs();
+    let leading_zeros = i32::bounded_from(magnitude.leading_zeros());
+    // `rotate_right` reduces modulo 32, so a negative rotation becomes the matching left
+    // rotation, as in `silk_ROR32`.
+    let rotation = (SQRT_FRACTION_END - leading_zeros).cast_unsigned();
+    let fraction = i32::bounded_from(magnitude.rotate_right(rotation) & SQRT_FRACTION_MASK);
     let base = if (leading_zeros & 1) != 0 { SQRT_BASE_ODD } else { SQRT_BASE_EVEN };
     let y = base >> (leading_zeros >> 1);
-    return mul_add_q16_i16(y, y, (SQRT_FRACTION_SLOPE_Q16 * fraction) as i16);
+    return mul_add_q16_i16(y, y, wrap_i16(SQRT_FRACTION_SLOPE_Q16 * fraction));
 }
 
 #[cfg(test)]
@@ -289,7 +306,7 @@ mod tests {
         for (a, b, q) in
             [(1_000, 3, 16), (123_456, 789, 12), (-65_536, 1_000, 16), (7, 1 << 20, 30)]
         {
-            let exact = ((i64::from(a) << q) / i64::from(b)) as i32;
+            let exact = i32::try_from((i64::from(a) << q) / i64::from(b)).unwrap();
             let approximate = div_q(a, b, q);
             let tolerance = (exact.abs() >> 14) + 2;
             assert!(
@@ -298,7 +315,7 @@ mod tests {
             );
         }
         for (b, q) in [(3, 20), (1_000, 29), (65_536, 30)] {
-            let exact = ((1i64 << q) / i64::from(b)) as i32;
+            let exact = i32::try_from((1i64 << q) / i64::from(b)).unwrap();
             let approximate = reciprocal_q(b, q);
             let tolerance = (exact.abs() >> 14) + 2;
             assert!(

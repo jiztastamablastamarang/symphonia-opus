@@ -5,6 +5,14 @@
 //! The tables are grouped by the decoding stage that reads them (`header`, `gain`, `lsf`, `ltp`,
 //! `excitation`, `resampler`, `plc`) and re-exported at this module's root.
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 // The codebooks and filter tables are lookup tables read by index.
 
 pub(crate) use self::excitation::*;
@@ -2617,8 +2625,8 @@ mod tests {
 
     #[test]
     fn lsf_stage_two_selector_bounds() {
-        for row in CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_NARROWBAND_OR_MEDIUMBAND.iter() {
-            for &sel in row.iter() {
+        for row in &CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_NARROWBAND_OR_MEDIUMBAND {
+            for &sel in row {
                 assert!(
                     (sel as usize) < 8,
                     "NB/MB Stage-2 codebook selector {sel} must be in 0..8 (a..h)"
@@ -2626,8 +2634,8 @@ mod tests {
             }
         }
 
-        for row in CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_WIDEBAND.iter() {
-            for &sel in row.iter() {
+        for row in &CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_WIDEBAND {
+            for &sel in row {
                 assert!(
                     (8..16).contains(&(sel as usize)),
                     "WB Stage-2 codebook selector {sel} must be in 8..16 (i..p)"
@@ -2638,14 +2646,14 @@ mod tests {
 
     #[test]
     fn lsf_prediction_weight_selector_bounds() {
-        for row in PREDICTION_WEIGHT_SELECTION_NB_MB.iter() {
-            for &sel in row.iter() {
+        for row in &PREDICTION_WEIGHT_SELECTION_NB_MB {
+            for &sel in row {
                 assert!((sel as usize) < PREDICTION_WEIGHTS_NB_MB.len());
             }
         }
 
-        for row in PREDICTION_WEIGHT_SELECTION_WB.iter() {
-            for &sel in row.iter() {
+        for row in &PREDICTION_WEIGHT_SELECTION_WB {
+            for &sel in row {
                 assert!((sel as usize) < PREDICTION_WEIGHTS_WB.len());
             }
         }

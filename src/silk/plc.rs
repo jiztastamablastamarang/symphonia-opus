@@ -34,8 +34,18 @@
 //!                     +-----------------------------------+
 //! ```
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
+use crate::convert::{BoundedFrom, wrap_i16};
 use crate::fixed::{
-    mul_add_q16_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift, saturate_i16, sqrt_approx,
+    mul_add_q16_i16, mul_low_i16, mul_q16, mul_q16_i16, reciprocal_q, round_shift, saturate_i16,
+    sqrt_approx,
 };
 use crate::silk::constant::{
     HARMONIC_ATTENUATION_Q15, NOISE_ATTENUATION_Q15, NUM_ATTENUATION_STAGES,
@@ -115,7 +125,7 @@ const PITCH_DRIFT_FACTOR_Q16: i16 = 655;
 const RAND_BUF_SIZE: usize = 128;
 
 /// Bitmask for indexing into the 128-sample random excitation window (`0x7F`).
-const RAND_BUF_MASK: i32 = (RAND_BUF_SIZE as i32) - 1;
+const RAND_BUF_MASK: i32 = (1 << RAND_BUF_SIZE.trailing_zeros()) - 1;
 
 /// High threshold (`2^3 = 8 dB`) for inverse LPC prediction gain down-scaling during unvoiced PLC.
 const LOG2_INV_LPC_GAIN_HIGH_THRES: u32 = 3;
@@ -157,10 +167,10 @@ pub(crate) fn chirp_bandwidth_expand(coeffs_q12: &mut [i16], mut factor_q16: i32
 
     let step_q16 = factor_q16 - UNIT_GAIN_Q16;
     for coeff in head_coeffs.iter_mut() {
-        *coeff = round_shift(factor_q16 * (*coeff as i32), Q16_SHIFT) as i16;
+        *coeff = wrap_i16(round_shift(factor_q16 * i32::from(*coeff), Q16_SHIFT));
         factor_q16 += round_shift(factor_q16 * step_q16, Q16_SHIFT);
     }
-    *last_coeff = round_shift(factor_q16 * (*last_coeff as i32), Q16_SHIFT) as i16;
+    *last_coeff = wrap_i16(round_shift(factor_q16 * i32::from(*last_coeff), Q16_SHIFT));
     return;
 }
 
@@ -173,14 +183,16 @@ pub(crate) fn sum_sqr_shift(samples: &[i16]) -> (i32, i32) {
         return (0, 0);
     }
 
-    let len = samples.len() as i32;
-    let mut shift = 31 - ((len as u32).leading_zeros() as i32);
+    // A frame holds at most a few hundred samples, and the bit counts are at most 32.
+    let len = i32::bounded_from(samples.len());
+    let first_shift = 31 - i32::bounded_from(len.unsigned_abs().leading_zeros());
 
-    let first_pass_energy = accumulate_shifted_pair_squares(samples, len, shift as u32);
-    let leading_zeros = (first_pass_energy as u32).leading_zeros() as i32;
-    shift = (shift + 3 - leading_zeros).max(0);
+    let first_pass_energy =
+        accumulate_shifted_pair_squares(samples, len, first_shift.unsigned_abs());
+    let leading_zeros = i32::bounded_from(first_pass_energy.cast_unsigned().leading_zeros());
+    let shift = (first_shift + 3 - leading_zeros).max(0);
 
-    let energy = accumulate_shifted_pair_squares(samples, 0, shift as u32);
+    let energy = accumulate_shifted_pair_squares(samples, 0, shift.unsigned_abs());
     return (energy, shift);
 }
 
@@ -284,7 +296,7 @@ impl PlcState {
     /// Resets only the frame-dependent pitch lag, unit gains, and default subframe geometry
     /// when the internal SILK sample rate changes (RFC 6716 Section 4.4).
     pub(crate) fn reset_frame_parameters(&mut self, frame_length: usize) {
-        self.pitch_l_q8 = (frame_length as i32) << (PITCH_LAG_Q8_SHIFT - 1);
+        self.pitch_l_q8 = i32::bounded_from(frame_length) << (PITCH_LAG_Q8_SHIFT - 1);
         self.prev_gain_q16 = [UNIT_GAIN_Q16, UNIT_GAIN_Q16];
         self.subfr_length = 20;
         self.nb_subfr = 2;
@@ -339,11 +351,11 @@ impl PlcState {
             SignalType::Voiced => {
                 self.select_voiced_pitch_and_ltp_gain(frame, subfr_length, nb_subfr);
                 self.ltp_scale_q14 = frame.ltp_scale_q14;
-                ch_state.prev_pitch_lag = frame.subframes[nb_subfr - 1].pitch_lag as i32;
+                ch_state.prev_pitch_lag = i32::from(frame.subframes[nb_subfr - 1].pitch_lag);
             }
             SignalType::Inactive | SignalType::Unvoiced => {
                 self.pitch_l_q8 =
-                    ((sample_rate_khz as i32) * MAX_PITCH_LAG_MS) << PITCH_LAG_Q8_SHIFT;
+                    (i32::bounded_from(sample_rate_khz) * MAX_PITCH_LAG_MS) << PITCH_LAG_Q8_SHIFT;
                 self.ltp_coef_q14 = [0; LTP_ORDER];
                 self.ltp_scale_q14 = 0;
                 ch_state.prev_pitch_lag = 0;
@@ -369,23 +381,28 @@ impl PlcState {
         subfr_length: usize,
         nb_subfr: usize,
     ) {
-        let last_pitch_lag = frame.subframes[nb_subfr - 1].pitch_lag as usize;
+        let last_pitch_lag = usize::from(frame.subframes[nb_subfr - 1].pitch_lag);
         let (max_ltp_gain_q14, selected_lag_q8) = frame.subframes[..nb_subfr]
             .iter()
             .rev()
             .enumerate()
             .take_while(|&(i, _)| i * subfr_length < last_pitch_lag)
             .fold((0i32, self.pitch_l_q8), |(max_gain, best_lag_q8), (_, subfr)| {
-                let gain_q14: i32 =
-                    subfr.ltp_coeffs.iter().map(|&c| (c as i32) << LTP_COEFF_Q7_TO_Q14_SHIFT).sum();
-                let lag_q8 = (subfr.pitch_lag as i32) << PITCH_LAG_Q8_SHIFT;
-                let best = (max_gain, best_lag_q8);
-                return if gain_q14 > max_gain { (gain_q14, lag_q8) } else { best };
+                let gain_q14: i32 = subfr
+                    .ltp_coeffs
+                    .iter()
+                    .map(|&c| i32::from(c) << LTP_COEFF_Q7_TO_Q14_SHIFT)
+                    .sum();
+                match gain_q14 > max_gain {
+                    true => (gain_q14, i32::from(subfr.pitch_lag) << PITCH_LAG_Q8_SHIFT),
+                    false => (max_gain, best_lag_q8),
+                }
             });
 
         self.pitch_l_q8 = selected_lag_q8;
         self.ltp_coef_q14 = [0; LTP_ORDER];
-        self.ltp_coef_q14[LTP_ORDER / 2] = max_ltp_gain_q14 as i16;
+        // The summed gain can exceed 16 bits; the reference decoder stores it with a 16-bit cast.
+        self.ltp_coef_q14[LTP_ORDER / 2] = wrap_i16(max_ltp_gain_q14);
 
         let clamp_scale = match max_ltp_gain_q14 {
             g if g < VOICED_PITCH_GAIN_MIN_Q14 => Some((
@@ -400,10 +417,9 @@ impl PlcState {
         };
 
         if let Some((scale, shift)) = clamp_scale {
-            let scale_i32 = scale as i16 as i32;
-            self.ltp_coef_q14
-                .iter_mut()
-                .for_each(|coeff| *coeff = (((*coeff as i32) * scale_i32) >> shift) as i16);
+            self.ltp_coef_q14.iter_mut().for_each(|coeff| {
+                *coeff = wrap_i16(mul_low_i16(i32::from(*coeff), scale) >> shift);
+            });
         }
         return;
     }
@@ -440,8 +456,9 @@ impl PlcState {
             ltp_mem_length: ch_state.ltp_mem_length.min(MAX_LTP_MEM_SAMPLES),
             subframes,
             subframe_samples,
-            initial_lag: round_shift(self.pitch_l_q8, PITCH_LAG_Q8_SHIFT) as usize,
-            max_pitch_lag_q8: (MAX_PITCH_LAG_MS * (sample_rate_khz as i32)) << PITCH_LAG_Q8_SHIFT,
+            initial_lag: usize::bounded_from(round_shift(self.pitch_l_q8, PITCH_LAG_Q8_SHIFT)),
+            max_pitch_lag_q8: (MAX_PITCH_LAG_MS * i32::bounded_from(sample_rate_khz))
+                << PITCH_LAG_Q8_SHIFT,
         };
         let mut ltp_state_q14 = [0i32; MAX_LTP_MEM_SAMPLES + MAX_FRAME_SAMPLES];
         self.rewhiten_ltp_history(
@@ -462,7 +479,7 @@ impl PlcState {
             &mut out_pcm[..frame_length],
         );
         ch_state.push_output_history(&out_pcm[..frame_length]);
-        ch_state.prev_pitch_lag = final_lag as i32;
+        ch_state.prev_pitch_lag = i32::bounded_from(final_lag);
         self.loss_count += 1;
         return;
     }
@@ -545,8 +562,9 @@ impl PlcState {
                 .iter()
                 .fold(UNIT_SCALE_Q14, |acc, &tap_q14| acc.wrapping_sub(tap_q14))
                 .max(VOICED_MIN_RAND_SCALE_Q14);
-            let rand_scale_q14 =
-                (((residual_scale_q14 as i32) * (self.ltp_scale_q14 as i32)) >> Q14_SHIFT) as i16;
+            let rand_scale_q14 = wrap_i16(
+                (i32::from(residual_scale_q14) * i32::from(self.ltp_scale_q14)) >> Q14_SHIFT,
+            );
             return (rand_scale_q14, base_noise_attenuation_q15);
         }
 
@@ -556,7 +574,7 @@ impl PlcState {
         let down_scale_q30 =
             inv_gain_q30.clamp(low_limit_q30, high_limit_q30) << LOG2_INV_LPC_GAIN_HIGH_THRES;
         let noise_attenuation_q15 =
-            mul_q16_i16(down_scale_q30, base_noise_attenuation_q15 as i16) >> Q14_SHIFT;
+            mul_q16_i16(down_scale_q30, wrap_i16(base_noise_attenuation_q15)) >> Q14_SHIFT;
 
         return (UNIT_SCALE_Q14, noise_attenuation_q15);
     }
@@ -631,26 +649,28 @@ impl PlcState {
                 let prediction_q12 =
                     self.pitch_prediction_q12(ltp_state_q14, write, lag, shape.voiced);
                 rand_seed = advance_lcg_seed(rand_seed);
-                let noise_q14 =
-                    noise_window[((rand_seed >> RAND_INDEX_SHIFT) & RAND_BUF_MASK) as usize];
+                let noise_q14 = noise_window
+                    [usize::bounded_from((rand_seed >> RAND_INDEX_SHIFT) & RAND_BUF_MASK)];
                 ltp_state_q14[write] = mul_add_q16_i16(prediction_q12, noise_q14, rand_scale_q14)
                     .wrapping_shl(Q12_TO_Q14_SHIFT);
                 write += 1;
             }
 
             if shape.voiced {
-                let attenuation_q15 = shape.harmonic_attenuation_q15 as i16 as i32;
                 self.ltp_coef_q14.iter_mut().for_each(|tap_q14| {
-                    *tap_q14 = ((attenuation_q15 * (*tap_q14 as i32)) >> Q15_SHIFT) as i16;
+                    *tap_q14 = wrap_i16(
+                        mul_low_i16(shape.harmonic_attenuation_q15, i32::from(*tap_q14))
+                            >> Q15_SHIFT,
+                    );
                 });
             }
-            rand_scale_q14 = (((rand_scale_q14 as i32)
-                * (shape.noise_attenuation_q15 as i16 as i32))
-                >> Q15_SHIFT) as i16;
+            rand_scale_q14 = wrap_i16(
+                mul_low_i16(i32::from(rand_scale_q14), shape.noise_attenuation_q15) >> Q15_SHIFT,
+            );
             self.pitch_l_q8 =
                 mul_add_q16_i16(self.pitch_l_q8, self.pitch_l_q8, PITCH_DRIFT_FACTOR_Q16)
                     .min(geometry.max_pitch_lag_q8);
-            lag = round_shift(self.pitch_l_q8, PITCH_LAG_Q8_SHIFT) as usize;
+            lag = usize::bounded_from(round_shift(self.pitch_l_q8, PITCH_LAG_Q8_SHIFT));
         }
 
         self.rand_seed = rand_seed;
@@ -683,11 +703,11 @@ impl PlcState {
         let (mut energy, energy_shift) = sum_sqr_shift(frame_pcm);
         match energy_shift.cmp(&self.conc_energy_shift) {
             std::cmp::Ordering::Greater => {
-                let shift_diff = (energy_shift - self.conc_energy_shift) as u32;
+                let shift_diff = (energy_shift - self.conc_energy_shift).unsigned_abs();
                 self.conc_energy = self.conc_energy.checked_shr(shift_diff).unwrap_or(0);
             }
             std::cmp::Ordering::Less => {
-                let shift_diff = (self.conc_energy_shift - energy_shift) as u32;
+                let shift_diff = (self.conc_energy_shift - energy_shift).unsigned_abs();
                 energy = energy.checked_shr(shift_diff).unwrap_or(0);
             }
             std::cmp::Ordering::Equal => {}
@@ -697,23 +717,25 @@ impl PlcState {
             return;
         }
 
-        let leading_zeros = ((self.conc_energy as u32).leading_zeros() as i32) - 1;
-        self.conc_energy = self.conc_energy.wrapping_shl(leading_zeros as u32);
-        let energy_rshift = (GLUE_FRAC_Q24_SHIFT - leading_zeros).max(0) as u32;
+        // `silk_CLZ32` of the signed energy minus one; `wrapping_shl` masks the shift like C.
+        let leading_zeros = i32::bounded_from(self.conc_energy.cast_unsigned().leading_zeros()) - 1;
+        self.conc_energy = self.conc_energy.wrapping_shl(leading_zeros.cast_unsigned());
+        let energy_rshift = (GLUE_FRAC_Q24_SHIFT - leading_zeros).max(0).unsigned_abs();
         energy = energy.checked_shr(energy_rshift).unwrap_or(0);
 
         let frac_q24 = self.conc_energy / energy.max(1);
         let gain_q16 = sqrt_approx(frac_q24).wrapping_shl(GLUE_SQRT_Q12_TO_Q16_SHIFT);
-        let slope_q16 = ((UNIT_GAIN_Q16 - gain_q16) / (frame_pcm.len() as i16 as i32))
+        // A frame holds at most 320 samples.
+        let slope_q16 = ((UNIT_GAIN_Q16 - gain_q16) / i32::bounded_from(frame_pcm.len()))
             .wrapping_shl(GLUE_SLOPE_Q16_SHIFT);
 
         frame_pcm
             .iter_mut()
-            .enumerate()
-            .map(|(i, sample)| (sample, gain_q16 + (i as i32) * slope_q16))
+            .zip(0i32..)
+            .map(|(sample, i)| (sample, gain_q16 + i * slope_q16))
             .take_while(|&(_, g_q16)| g_q16 <= UNIT_GAIN_Q16)
             .for_each(|(sample, g_q16)| {
-                *sample = mul_q16_i16(g_q16, *sample) as i16;
+                *sample = wrap_i16(mul_q16_i16(g_q16, *sample));
             });
         return;
     }

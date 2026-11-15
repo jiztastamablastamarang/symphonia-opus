@@ -7,8 +7,17 @@
 //! batches of at most `RESAMPLER_MAX_BATCH_SIZE_MS` so that the stack buffers stay bounded
 //! ([RFC 8251 Section 5](<https://datatracker.ietf.org/doc/html/rfc8251#section-5>)).
 
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 use symphonia_core::errors::Result;
 
+use crate::convert::BoundedFrom;
 use crate::fixed::{mul_add_q16_i16, mul_q16, mul_q16_i16, round_shift, saturate_i16};
 use crate::silk::constant::resampler::{
     RESAMPLER_1_2_COEFS, RESAMPLER_2_3_COEFS, RESAMPLER_3_4_COEFS, RESAMPLER_DELAY_MATRIX_DEC,
@@ -93,14 +102,14 @@ impl DownFilter {
     /// position `k * index_increment_q16` below the batch length into `out`, returning the
     /// number of samples written (RFC 6716 Section 4.2.9).
     fn interpolate(self, buf: &[i32], index_increment_q16: i32, out: &mut [i16]) -> usize {
-        let max_index_q16 = ((buf.len() - self.order()) as i32) << 16;
+        let max_index_q16 = i32::bounded_from(buf.len() - self.order()) << 16;
         let positions_q16 = (0i32..)
             .map(|k| k * index_increment_q16)
             .take_while(|&index_q16| index_q16 < max_index_q16);
 
         let mut written = 0usize;
         for (out_sample, index_q16) in out.iter_mut().zip(positions_q16) {
-            let window = &buf[(index_q16 >> 16) as usize..];
+            let window = &buf[usize::bounded_from(index_q16 >> 16)..];
             let res_q6 = self.tap_sum_q6(window, index_q16 & INDEX_FRAC_Q16_MASK);
             *out_sample = saturate_i16(round_shift(res_q6, DOWN_FIR_Q6_SHIFT));
             written += 1;
@@ -115,7 +124,8 @@ impl DownFilter {
         return match self {
             Self::Interpolated { fractions, .. } => {
                 const HALF_ORDER: usize = RESAMPLER_DOWN_ORDER_FIR0 / 2;
-                let phase = mul_q16_i16(frac_q16, fractions as i16) as usize;
+                let phase =
+                    usize::bounded_from(mul_q16_i16(frac_q16, i16::bounded_from(fractions)));
                 let rising = &fir[HALF_ORDER * phase..HALF_ORDER * (phase + 1)];
                 let falling_start = HALF_ORDER * (fractions - 1 - phase);
                 let falling = &fir[falling_start..falling_start + HALF_ORDER];
@@ -226,7 +236,11 @@ impl ResamplerState {
                 RESAMPLER_DELAY_MATRIX_DEC[in_rate as usize][out_rate as usize],
             ),
             batch_size: input_rate_khz * RESAMPLER_MAX_BATCH_SIZE_MS,
-            inv_ratio_q16: inverse_ratio_q16(fs_hz_in as i32, fs_hz_out as i32, up2x),
+            inv_ratio_q16: inverse_ratio_q16(
+                i32::bounded_from(fs_hz_in),
+                i32::bounded_from(fs_hz_out),
+                up2x,
+            ),
             mode,
             ..Self::new()
         };
@@ -507,7 +521,7 @@ fn up2_hq(iir_state: &mut [i32; 2 * ALLPASS_SECTIONS], out: &mut [i16], input: &
 /// of samples written (RFC 6716 Section 4.2.9).
 fn interpolate_fir_12(buf: &[i16], index_increment_q16: i32, out: &mut [i16]) -> usize {
     const ORDER: usize = RESAMPLER_ORDER_FIR_12;
-    let max_index_q16 = ((buf.len() - ORDER) as i32) << 16;
+    let max_index_q16 = i32::bounded_from(buf.len() - ORDER) << 16;
     let mut index_q16 = 0i32;
     let mut written = 0usize;
 
@@ -515,17 +529,17 @@ fn interpolate_fir_12(buf: &[i16], index_increment_q16: i32, out: &mut [i16]) ->
         if index_q16 >= max_index_q16 {
             break;
         }
-        let phase = mul_q16_i16(index_q16 & INDEX_FRAC_Q16_MASK, UP_FIR_PHASES) as usize;
-        let offset = (index_q16 >> 16) as usize;
+        let phase =
+            usize::bounded_from(mul_q16_i16(index_q16 & INDEX_FRAC_Q16_MASK, UP_FIR_PHASES));
+        let offset = usize::bounded_from(index_q16 >> 16);
         let Some(window) = buf[offset..].first_chunk::<ORDER>()
         else {
             break;
         };
         let taps = &RESAMPLER_FRAC_FIR_12_TAPS[phase];
-        let res_q15 = window
-            .iter()
-            .zip(taps.iter())
-            .fold(0i32, |acc, (&sample, &tap)| acc.wrapping_add((sample as i32) * (tap as i32)));
+        let res_q15 = window.iter().zip(taps.iter()).fold(0i32, |acc, (&sample, &tap)| {
+            acc.wrapping_add(i32::from(sample) * i32::from(tap))
+        });
 
         *out_sample = saturate_i16(round_shift(res_q15, UP_FIR_Q15_SHIFT));
         index_q16 += index_increment_q16;
@@ -540,7 +554,7 @@ fn ar2(state: &mut [i32; AR2_COEFS], out_q8: &mut [i32], input: &[i16], a_q14: [
     let [mut s0, mut s1] = *state;
     let [a0, a1] = a_q14;
     for (out, &sample) in out_q8.iter_mut().zip(input.iter()) {
-        let out32 = s0.wrapping_add((sample as i32) << AR2_OUTPUT_Q8_SHIFT);
+        let out32 = s0.wrapping_add(i32::from(sample) << AR2_OUTPUT_Q8_SHIFT);
         *out = out32;
         let fed_back = out32 << AR2_FEEDBACK_SHIFT;
         s0 = mul_add_q16_i16(s1, fed_back, a0);
@@ -555,6 +569,7 @@ mod tests {
     // normative (RFC 6716 Section 4.2.9) and is verified against the RFC 8251 test vectors by
     // `tests/rfc6716_conformance.rs`.
     use super::*;
+    use crate::convert::trunc_saturating_i16;
 
     macro_rules! assert_resampler_tail {
         ($in_rate:expr, $out_rate:expr, $out_len:expr, $in_sig:expr, $expected_tail:expr) => {{
@@ -581,11 +596,11 @@ mod tests {
             1279, 2097,
         ];
 
-        let in_sig: [i16; 80] = std::array::from_fn(|i| {
-            let v = 4000.0 * (2.0 * std::f64::consts::PI * i as f64 / 16.0).sin()
-                + 1500.0 * (2.0 * std::f64::consts::PI * i as f64 / 7.0).cos();
-            v as i16
-        });
+        let mut in_sig = [0i16; 80];
+        for (sample, i) in in_sig.iter_mut().zip(0..) {
+            let t = 2.0 * std::f64::consts::PI * f64::from(i);
+            *sample = trunc_saturating_i16(4000.0 * (t / 16.0).sin() + 1500.0 * (t / 7.0).cos());
+        }
 
         assert_resampler_tail!(8000, 16000, 160, in_sig, EXPECTED_RESAMP_8_TO_16_TAIL);
         assert_resampler_tail!(16000, 8000, 40, in_sig, EXPECTED_RESAMP_16_TO_8_TAIL);
